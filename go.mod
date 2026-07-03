@@ -1,6 +1,6 @@
 module github.com/dysodeng/mq
 
-go 1.23.0
+go 1.25.0
 
 require (
 	github.com/go-redis/redis/v8 v8.11.5
@@ -24,5 +24,5 @@ require (
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	go.opentelemetry.io/otel/trace v1.36.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/net v0.40.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
 )
