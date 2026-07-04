@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dysodeng/mq/config"
-	"github.com/dysodeng/mq/message"
-	"github.com/dysodeng/mq/observability"
+	"github.com/goairix/mq/config"
+	"github.com/goairix/mq/message"
+	"github.com/goairix/mq/observability"
 	"github.com/google/uuid"
 )
 

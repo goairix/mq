@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/dysodeng/mq/config"
 	"github.com/go-redis/redis/v8"
+	"github.com/goairix/mq/config"
 )
 
 // Client Redis客户端接口

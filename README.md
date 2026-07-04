@@ -2,7 +2,7 @@
 
 [![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8?style=flat&logo=go)](https://golang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Go Report Card](https://goreportcard.com/badge/github.com/dysodeng/mq)](https://goreportcard.com/report/github.com/dysodeng/mq)
+[![Go Report Card](https://goreportcard.com/badge/github.com/goairix/mq)](https://goreportcard.com/report/github.com/goairix/mq)
 
 一个高性能、可扩展的Go语言消息队列包，支持多种底层实现和企业级特性。
 
@@ -23,7 +23,7 @@
 ### 安装
 
 ```bash
-go get github.com/dysodeng/mq
+go get github.com/goairix/mq
 ```
 
 ### 基本用法
@@ -35,9 +35,9 @@ import (
     "log"
     "time"
     
-    "github.com/dysodeng/mq"
-    "github.com/dysodeng/mq/config"
-    "github.com/dysodeng/mq/message"
+    "github.com/goairix/mq"
+    "github.com/goairix/mq/config"
+    "github.com/goairix/mq/message"
 )
 
 func main() {
@@ -213,8 +213,8 @@ cfg := config.Config{
 package main
 
 import (
-    "github.com/dysodeng/mq"
-    "github.com/dysodeng/mq/config"
+    "github.com/goairix/mq"
+    "github.com/goairix/mq/config"
     "go.opentelemetry.io/otel"
     "go.opentelemetry.io/otel/metric"
     "go.uber.org/zap"

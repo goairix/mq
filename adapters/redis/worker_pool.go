@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dysodeng/mq/message"
-	"github.com/dysodeng/mq/observability"
+	"github.com/goairix/mq/message"
+	"github.com/goairix/mq/observability"
 	"go.uber.org/zap"
 )
 

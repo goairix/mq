@@ -7,12 +7,12 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/dysodeng/mq/serializer"
+	"github.com/goairix/mq/serializer"
 
 	"github.com/go-redis/redis/v8"
 
-	"github.com/dysodeng/mq/message"
-	"github.com/dysodeng/mq/observability"
+	"github.com/goairix/mq/message"
+	"github.com/goairix/mq/observability"
 	"go.uber.org/zap"
 )
 

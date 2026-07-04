@@ -2,7 +2,7 @@
 
 [![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8?style=flat&logo=go)](https://golang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Go Report Card](https://goreportcard.com/badge/github.com/dysodeng/mq)](https://goreportcard.com/report/github.com/dysodeng/mq)
+[![Go Report Card](https://goreportcard.com/badge/github.com/goairix/mq)](https://goreportcard.com/report/github.com/goairix/mq)
 
 A high-performance, scalable Go message queue package that supports multiple underlying implementations and enterprise-grade features.
 
@@ -23,7 +23,7 @@ A high-performance, scalable Go message queue package that supports multiple und
 ### Installation
 
 ```bash
-go get github.com/dysodeng/mq
+go get github.com/goairix/mq
 ```
 
 ### Basic Usage
@@ -35,9 +35,9 @@ import (
     "log"
     "time"
     
-    "github.com/dysodeng/mq"
-    "github.com/dysodeng/mq/config"
-    "github.com/dysodeng/mq/message"
+    "github.com/goairix/mq"
+    "github.com/goairix/mq/config"
+    "github.com/goairix/mq/message"
 )
 
 func main() {
@@ -201,8 +201,8 @@ The package supports comprehensive observability through OpenTelemetry and struc
 package main
 
 import (
-    "github.com/dysodeng/mq"
-    "github.com/dysodeng/mq/config"
+    "github.com/goairix/mq"
+    "github.com/goairix/mq/config"
     "go.opentelemetry.io/otel"
     "go.opentelemetry.io/otel/metric"
     "go.uber.org/zap"

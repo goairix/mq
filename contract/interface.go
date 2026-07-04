@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/dysodeng/mq/message"
+	"github.com/goairix/mq/message"
 )
 
 // Producer 生产者接口

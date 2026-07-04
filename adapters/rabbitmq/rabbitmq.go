@@ -6,11 +6,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dysodeng/mq/config"
-	"github.com/dysodeng/mq/contract"
-	"github.com/dysodeng/mq/observability"
-	"github.com/dysodeng/mq/pool"
-	"github.com/dysodeng/mq/serializer"
+	"github.com/goairix/mq/config"
+	"github.com/goairix/mq/contract"
+	"github.com/goairix/mq/observability"
+	"github.com/goairix/mq/pool"
+	"github.com/goairix/mq/serializer"
 	"go.uber.org/zap"
 )
 

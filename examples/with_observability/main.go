@@ -5,9 +5,9 @@ import (
 	"log"
 	"time"
 
-	"github.com/dysodeng/mq"
-	"github.com/dysodeng/mq/config"
-	"github.com/dysodeng/mq/message"
+	"github.com/goairix/mq"
+	"github.com/goairix/mq/config"
+	"github.com/goairix/mq/message"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"

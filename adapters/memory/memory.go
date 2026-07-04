@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dysodeng/mq/config"
-	"github.com/dysodeng/mq/contract"
-	"github.com/dysodeng/mq/observability"
+	"github.com/goairix/mq/config"
+	"github.com/goairix/mq/contract"
+	"github.com/goairix/mq/observability"
 )
 
 // Memory 内存消息队列实现

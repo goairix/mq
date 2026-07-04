@@ -8,9 +8,9 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/dysodeng/mq/config"
-	"github.com/dysodeng/mq/message"
-	"github.com/dysodeng/mq/observability"
+	"github.com/goairix/mq/config"
+	"github.com/goairix/mq/message"
+	"github.com/goairix/mq/observability"
 )
 
 // Consumer 内存消费者

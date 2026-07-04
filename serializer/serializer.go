@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/dysodeng/mq/message"
+	"github.com/goairix/mq/message"
 	"github.com/vmihailenco/msgpack/v5"
 )
 

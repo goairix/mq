@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/dysodeng/mq/message"
+	"github.com/goairix/mq/message"
 )
 
 // Queue 内存队列

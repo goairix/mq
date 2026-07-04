@@ -9,10 +9,10 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 
-	"github.com/dysodeng/mq"
-	"github.com/dysodeng/mq/config"
-	"github.com/dysodeng/mq/contract"
-	"github.com/dysodeng/mq/message"
+	"github.com/goairix/mq"
+	"github.com/goairix/mq/config"
+	"github.com/goairix/mq/contract"
+	"github.com/goairix/mq/message"
 )
 
 // MyObserver 实现Observer接口
