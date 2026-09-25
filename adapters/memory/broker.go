@@ -33,12 +33,14 @@ type topicState struct {
 
 // Broker is a bounded, process-local transport for deterministic tests.
 type Broker struct {
-	mu       sync.Mutex
-	topics   map[string]*topicState
-	capacity int
-	retained int
-	wake     chan struct{}
-	closed   bool
+	mu            sync.Mutex
+	topics        map[string]*topicState
+	capacity      int
+	retained      int
+	wake          chan struct{}
+	closed        bool
+	scheduled     scheduledHeap
+	schedulerDone chan struct{}
 }
 
 func New(capacity int) (*Broker, error) {
@@ -242,10 +244,18 @@ func (b *Broker) Close(ctx context.Context) error {
 		return err
 	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if !b.closed {
 		b.closed = true
 		b.signalLocked()
+	}
+	done := b.schedulerDone
+	b.mu.Unlock()
+	if done != nil {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	return nil
 }
