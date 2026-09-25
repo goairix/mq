@@ -4,3 +4,6 @@ use (
 	.
 	./adapters/memory
 )
+
+// Keep the unpublished local root version resolvable for workspace graph tools.
+replace github.com/goairix/mq/v2 v2.0.0 => .

@@ -22,6 +22,7 @@ type groupState struct {
 	completed  map[uint64]bool
 	attempts   int
 	nextRetry  time.Time
+	batchSince time.Time
 	deadLetter []DeadLetter
 }
 
@@ -32,17 +33,20 @@ type topicState struct {
 }
 
 // Broker is a bounded, process-local transport for deterministic tests.
+// Retained/scheduled records and dead letters each have a capacity limit.
 type Broker struct {
 	mu            sync.Mutex
 	topics        map[string]*topicState
 	capacity      int
 	retained      int
+	deadLetters   int
 	wake          chan struct{}
 	closed        bool
 	scheduled     scheduledHeap
 	schedulerDone chan struct{}
 }
 
+// New sets both the retained-record limit and dead-letter limit to capacity.
 func New(capacity int) (*Broker, error) {
 	if capacity <= 0 {
 		return nil, errors.New("memory capacity must be positive")
@@ -106,6 +110,17 @@ func (b *Broker) reclaimLocked() {
 			b.retained -= count
 		}
 	}
+}
+
+// appendDeadLetterLocked is called before a failed record is acknowledged.
+// Dead letters have their own capacity equal to the topic-log capacity.
+func (b *Broker) appendDeadLetterLocked(group *groupState, message mq.Message, reason error) bool {
+	if b.deadLetters >= b.capacity {
+		return false
+	}
+	group.deadLetter = append(group.deadLetter, DeadLetter{Message: cloneMessage(message), Reason: reason.Error()})
+	b.deadLetters++
+	return true
 }
 
 func (b *Broker) Publish(ctx context.Context, m mq.Message) error {
@@ -178,7 +193,11 @@ func (b *Broker) Run(ctx context.Context, sub mq.Subscription, handler mq.Handle
 			group.attempts = 0
 			group.nextRetry = time.Time{}
 		case mq.IsPermanent(err):
-			group.deadLetter = append(group.deadLetter, DeadLetter{Message: cloneMessage(msg), Reason: err.Error()})
+			if !b.appendDeadLetterLocked(group, msg, err) {
+				b.signalLocked()
+				b.mu.Unlock()
+				return mq.ErrBackpressure
+			}
 			group.completed[group.next] = true
 			group.attempts = 0
 			group.nextRetry = time.Time{}
@@ -190,6 +209,7 @@ func (b *Broker) Run(ctx context.Context, sub mq.Subscription, handler mq.Handle
 			delete(group.completed, group.next)
 			group.next++
 		}
+		group.batchSince = time.Time{}
 		b.signalLocked()
 		b.mu.Unlock()
 	}

@@ -48,6 +48,7 @@ func (b *Broker) RunBatch(ctx context.Context, sub mq.Subscription, options mq.B
 		var batch []mq.Message
 		var indices []uint64
 		var size int
+		var hitLimit bool
 		if !group.busy && !time.Now().Before(group.nextRetry) {
 			for index := group.next; index-topic.base < uint64(len(topic.messages)) && len(batch) < options.MaxMessages; index++ {
 				if group.completed[index] {
@@ -60,20 +61,35 @@ func (b *Broker) RunBatch(ctx context.Context, sub mq.Subscription, options mq.B
 					return fmt.Errorf("message %s size %d exceeds MaxInFlightBytes %d", message.ID, messageSize, options.MaxInFlightBytes)
 				}
 				if len(batch) > 0 && (size+messageSize > options.MaxBytes || size+messageSize > options.MaxInFlightBytes) {
+					hitLimit = true
 					break
 				}
 				batch = append(batch, cloneMessage(message))
 				indices = append(indices, index)
 				size += messageSize
 				if size >= options.MaxBytes {
+					hitLimit = true
 					break
 				}
 			}
 			if len(batch) > 0 {
-				group.busy = true
+				if len(batch) == options.MaxMessages {
+					hitLimit = true
+				}
+				if group.batchSince.IsZero() {
+					group.batchSince = time.Now()
+				}
+				if options.MaxWait == 0 || hitLimit || !time.Now().Before(group.batchSince.Add(options.MaxWait)) {
+					group.busy = true
+				}
 			}
 		}
 		wake, retryAt := b.wake, group.nextRetry
+		if len(batch) > 0 && !group.busy {
+			retryAt = group.batchSince.Add(options.MaxWait)
+			batch = nil
+			indices = nil
+		}
 		if group.busy && len(batch) == 0 {
 			retryAt = time.Time{}
 		}
@@ -97,6 +113,7 @@ func (b *Broker) RunBatch(ctx context.Context, sub mq.Subscription, options mq.B
 		_, group = b.groupLocked(sub)
 		group.busy = false
 		failed := handlerErr != nil
+		deadLetterFull := false
 		for i, index := range indices {
 			if handlerErr != nil {
 				continue
@@ -109,8 +126,12 @@ func (b *Broker) RunBatch(ctx context.Context, sub mq.Subscription, options mq.B
 			case result == nil:
 				group.completed[index] = true
 			case mq.IsPermanent(result):
-				group.deadLetter = append(group.deadLetter, DeadLetter{Message: cloneMessage(batch[i]), Reason: result.Error()})
-				group.completed[index] = true
+				if b.appendDeadLetterLocked(group, batch[i], result) {
+					group.completed[index] = true
+				} else {
+					failed = true
+					deadLetterFull = true
+				}
 			default:
 				failed = true
 			}
@@ -125,9 +146,13 @@ func (b *Broker) RunBatch(ctx context.Context, sub mq.Subscription, options mq.B
 		} else {
 			group.attempts = 0
 			group.nextRetry = time.Time{}
+			group.batchSince = time.Time{}
 		}
 		b.signalLocked()
 		b.mu.Unlock()
+		if deadLetterFull {
+			return mq.ErrBackpressure
+		}
 	}
 }
 
