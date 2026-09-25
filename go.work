@@ -3,6 +3,7 @@ go 1.25.0
 use (
 	.
 	./adapters/memory
+	./adapters/redis
 )
 
 // Keep the unpublished local root version resolvable for workspace graph tools.

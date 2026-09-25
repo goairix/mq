@@ -102,6 +102,10 @@ func receiveBoth(t *testing.T, ch <-chan string, first, second string) {
 	}
 }
 
+func validInvalidResult(err error, handlerRan bool) bool {
+	return handlerRan && err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+}
+
 func run(t *testing.T, f Transport, sub mq.Subscription, handler mq.Handler) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -208,6 +212,21 @@ func Run(t *testing.T, factory Factory) {
 		})
 		receiveBoth(t, seen, first.ID, second.ID)
 	})
+	t.Run("batch all success", func(t *testing.T) {
+		f := fixture(t, factory)
+		name := topic(t)
+		sub := mq.Subscription{Topic: name, Name: "all-success"}
+		prepare(t, f, sub)
+		first, second := publish(t, f, name), publish(t, f, name)
+		seen := make(chan string, 16)
+		runBatch(t, f, sub, func(_ context.Context, batch []mq.Message) ([]error, error) {
+			for _, message := range batch {
+				offer(seen, message.ID)
+			}
+			return nil, nil
+		})
+		receiveBoth(t, seen, first.ID, second.ID)
+	})
 	t.Run("invalid batch result", func(t *testing.T) {
 		f := fixture(t, factory)
 		name := topic(t)
@@ -216,9 +235,13 @@ func Run(t *testing.T, factory Factory) {
 		m := publish(t, f, name)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		err := f.BatchSubscriber.RunBatch(ctx, sub, mq.DefaultBatchOptions(), func(context.Context, []mq.Message) ([]error, error) { return []error{}, nil })
-		if err == nil {
-			t.Fatal("invalid batch result accepted")
+		handlerRan := false
+		err := f.BatchSubscriber.RunBatch(ctx, sub, mq.DefaultBatchOptions(), func(context.Context, []mq.Message) ([]error, error) {
+			handlerRan = true
+			return []error{}, nil
+		})
+		if !validInvalidResult(err, handlerRan) {
+			t.Fatalf("invalid batch result not detected: handlerRan=%t error=%v", handlerRan, err)
 		}
 		got := make(chan string, 1)
 		run(t, f, sub, func(_ context.Context, msg mq.Message) error { offer(got, msg.ID); return nil })
