@@ -57,3 +57,10 @@ func TestMessageValidation(t *testing.T) {
 		t.Fatalf("expected topic error, got %v", err)
 	}
 }
+
+func TestMessageSizeBytes(t *testing.T) {
+	m := Message{ID: "a", Topic: "b", Key: []byte{1, 2}, Payload: []byte{3, 4, 5}, Headers: map[string]string{"x": "y"}, CreatedAt: time.Now()}
+	if got := m.SizeBytes(); got != 17 {
+		t.Fatalf("size = %d, want 17", got)
+	}
+}

@@ -20,6 +20,17 @@ type Message struct {
 	CreatedAt time.Time
 }
 
+// SizeBytes is the logical envelope size used by batch limits. It counts
+// UTF-8 bytes in the ID, topic, and headers, key and payload bytes, and eight
+// bytes for the timestamp. Backend framing is excluded.
+func (m Message) SizeBytes() int {
+	size := len(m.ID) + len(m.Topic) + len(m.Key) + len(m.Payload) + 8
+	for key, value := range m.Headers {
+		size += len(key) + len(value)
+	}
+	return size
+}
+
 func NewMessage(topic string, payload []byte) (Message, error) {
 	if strings.TrimSpace(topic) == "" {
 		return Message{}, errors.New("topic is required")

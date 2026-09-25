@@ -23,6 +23,12 @@ func (s Subscription) Validate() error {
 	return nil
 }
 
+// BatchOptions bounds each delivery batch and concurrent in-flight work.
+// MaxBytes uses Message.SizeBytes. MaxWait == 0 delivers available messages
+// immediately. A single message larger than MaxBytes is delivered alone if
+// it fits MaxInFlightBytes; one larger than MaxInFlightBytes makes RunBatch
+// return an error before invoking the handler. MaxInFlightBatches and
+// MaxInFlightBytes are hard upper bounds, not target concurrency levels.
 type BatchOptions struct {
 	MaxMessages        int
 	MaxBytes           int
