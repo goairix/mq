@@ -20,18 +20,19 @@ import (
 
 // Options controls only the Redis adapter. Zero values select safe defaults.
 type Options struct {
-	Prefix      string
-	Consumer    string
-	StartLatest bool
-	ReadCount   int64
-	Block       time.Duration
-	ClaimIdle   time.Duration
-	RetryMin    time.Duration
-	RetryMax    time.Duration
+	Prefix           string
+	Consumer         string
+	StartLatest      bool
+	ReadCount        int64
+	PublishBatchSize int
+	Block            time.Duration
+	ClaimIdle        time.Duration
+	RetryMin         time.Duration
+	RetryMax         time.Duration
 }
 
 func (o Options) withDefaults() (Options, error) {
-	if o.ReadCount < 0 || o.Block < 0 || o.ClaimIdle < 0 || o.RetryMin < 0 || o.RetryMax < 0 {
+	if o.ReadCount < 0 || o.PublishBatchSize < 0 || o.Block < 0 || o.ClaimIdle < 0 || o.RetryMin < 0 || o.RetryMax < 0 {
 		return o, errors.New("negative Redis transport option")
 	}
 	if o.Prefix == "" {
@@ -42,6 +43,9 @@ func (o Options) withDefaults() (Options, error) {
 	}
 	if o.ReadCount == 0 {
 		o.ReadCount = 128
+	}
+	if o.PublishBatchSize == 0 {
+		o.PublishBatchSize = 256
 	}
 	if o.Block == 0 {
 		o.Block = time.Second

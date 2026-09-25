@@ -22,6 +22,7 @@ func TestNewOptionsAndClose(t *testing.T) {
 	defer client.Close()
 	cases := []Options{
 		{ReadCount: -1},
+		{PublishBatchSize: -1},
 		{Block: -time.Second},
 		{ClaimIdle: -time.Second},
 		{RetryMin: -time.Second},
