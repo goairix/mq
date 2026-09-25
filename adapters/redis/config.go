@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	mq "github.com/goairix/mq/v2"
@@ -75,12 +76,13 @@ func (o Options) withDefaults() (Options, error) {
 
 // Adapter owns no Redis client; callers close the supplied client separately.
 type Adapter struct {
-	client  redis.UniversalClient
-	options Options
-	mu      sync.Mutex
-	closed  bool
-	active  int
-	drained chan struct{}
+	client       redis.UniversalClient
+	options      Options
+	mu           sync.Mutex
+	closed       bool
+	active       int
+	drained      chan struct{}
+	nextConsumer atomic.Uint64
 }
 
 func New(client redis.UniversalClient, options Options) (*Adapter, error) {
