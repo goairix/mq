@@ -8,6 +8,7 @@ import (
 	"time"
 
 	mq "github.com/goairix/mq/v2"
+	"github.com/goairix/mq/v2/contracttest"
 )
 
 func testMessage(t *testing.T, topic string) mq.Message {
@@ -195,5 +196,117 @@ func TestCanceledHandlerIsRedelivered(t *testing.T) {
 	}
 	if err := b.Publish(context.Background(), testMessage(t, "cancel")); err != nil {
 		t.Fatalf("consumed record did not free capacity: %v", err)
+	}
+}
+
+func TestPortableContract(t *testing.T) {
+	contracttest.Run(t, func(t *testing.T) contracttest.Transport {
+		b, err := New(64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return contracttest.Transport{
+			Publisher: b, Subscriber: b, BatchSubscriber: b,
+			Backpressure: func(t *testing.T) {
+				limited, _ := New(1)
+				if err := limited.Publish(context.Background(), testMessage(t, "full")); err != nil {
+					t.Fatal(err)
+				}
+				if err := limited.Publish(context.Background(), testMessage(t, "full")); !errors.Is(err, mq.ErrBackpressure) {
+					t.Fatalf("backpressure = %v", err)
+				}
+			},
+		}
+	})
+}
+
+func TestPublishBatchResults(t *testing.T) {
+	b, _ := New(1)
+	results := b.PublishBatch(context.Background(), []mq.Message{testMessage(t, "batch"), {}, testMessage(t, "batch")})
+	if err := mq.ValidatePublishResults(3, results); err != nil {
+		t.Fatal(err)
+	}
+	if results[0].State != mq.PublishAccepted || results[1].State != mq.PublishRejected || !errors.Is(results[2].Err, mq.ErrBackpressure) {
+		t.Fatalf("results = %+v", results)
+	}
+}
+
+func TestBatchOversizeLimits(t *testing.T) {
+	b, _ := New(4)
+	m := testMessage(t, "oversize")
+	m.Payload = make([]byte, 100)
+	if err := b.Publish(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	opts := mq.DefaultBatchOptions()
+	opts.MaxBytes = 32
+	opts.MaxInFlightBytes = 256
+	ctx, cancel := context.WithCancel(context.Background())
+	delivered := make(chan int, 1)
+	go func() {
+		_ = b.RunBatch(ctx, mq.Subscription{Topic: "oversize", Name: "soft"}, opts, func(_ context.Context, batch []mq.Message) ([]error, error) { delivered <- len(batch); return nil, nil })
+	}()
+	if got := awaitInt(t, delivered); got != 1 {
+		t.Fatalf("oversize batch length = %d", got)
+	}
+	cancel()
+	opts.MaxInFlightBytes = 32
+	ctx2, stop := context.WithTimeout(context.Background(), time.Second)
+	defer stop()
+	if err := b.RunBatch(ctx2, mq.Subscription{Topic: "oversize", Name: "hard"}, opts, func(context.Context, []mq.Message) ([]error, error) { t.Error("handler invoked"); return nil, nil }); err == nil {
+		t.Fatal("oversize record above hard cap accepted")
+	}
+}
+
+func awaitInt(t *testing.T, ch <-chan int) int {
+	t.Helper()
+	select {
+	case value := <-ch:
+		return value
+	case <-time.After(2 * time.Second):
+		t.Fatal("batch timeout")
+		return 0
+	}
+}
+
+func TestBatchPartialSuccessDoesNotRepeatLaterRecord(t *testing.T) {
+	b, _ := New(4)
+	first, second := testMessage(t, "partial"), testMessage(t, "partial")
+	for _, m := range []mq.Message{first, second} {
+		if err := b.Publish(context.Background(), m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := make(chan []string, 3)
+	go func() {
+		_ = b.RunBatch(ctx, mq.Subscription{Topic: "partial", Name: "one"}, mq.DefaultBatchOptions(), func(_ context.Context, batch []mq.Message) ([]error, error) {
+			ids := make([]string, len(batch))
+			for i, m := range batch {
+				ids[i] = m.ID
+			}
+			calls <- ids
+			if len(batch) == 2 {
+				return []error{errors.New("retry"), nil}, nil
+			}
+			return nil, nil
+		})
+	}()
+	initial := awaitIDs(t, calls)
+	retried := awaitIDs(t, calls)
+	if len(initial) != 2 || initial[0] != first.ID || initial[1] != second.ID || len(retried) != 1 || retried[0] != first.ID {
+		t.Fatalf("batches = %v then %v", initial, retried)
+	}
+}
+
+func awaitIDs(t *testing.T, ch <-chan []string) []string {
+	t.Helper()
+	select {
+	case value := <-ch:
+		return value
+	case <-time.After(2 * time.Second):
+		t.Fatal("batch timeout")
+		return nil
 	}
 }
