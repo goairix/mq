@@ -155,13 +155,21 @@ func decodeTask(encoded string) (mq.Message, time.Time, error) {
 }
 
 var insertScript = redis.NewScript(`
-local old = redis.call('HGET', KEYS[2], ARGV[1])
-if old then
-  if old == ARGV[2] then return 0 end
-  return redis.error_reply('MQ_DELAY_CONFLICT')
+local function valid(key, expected)
+  local kind = redis.call('TYPE', key).ok
+  return kind == 'none' or kind == expected
 end
-redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
-redis.call('ZADD', KEYS[1], ARGV[3], ARGV[1])
+if not valid(KEYS[1], 'zset') or not valid(KEYS[2], 'hash') or not valid(KEYS[3], 'zset') then
+  return redis.error_reply('MQ_DELAY_BAD_KEY_TYPE')
+end
+local old = redis.call('HGET', KEYS[2], ARGV[1])
+if old and old ~= ARGV[2] then return redis.error_reply('MQ_DELAY_CONFLICT') end
+local due = redis.call('ZSCORE', KEYS[1], ARGV[1])
+local leased = redis.call('ZSCORE', KEYS[3], ARGV[1])
+if not old then
+  redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
+end
+if not due and not leased then redis.call('ZADD', KEYS[1], ARGV[3], ARGV[1]) end
 return 1`)
 
 func (s *Scheduler) begin() error {
@@ -221,7 +229,7 @@ func (s *Scheduler) PublishAt(ctx context.Context, message mq.Message, due time.
 	}
 	defer s.end()
 	k := s.keys(s.laneFor(message))
-	_, err = insertScript.Run(ctx, s.client, []string{k.due, k.records}, taskID(message), encoded, ceilMillis(due)).Int()
+	_, err = insertScript.Run(ctx, s.client, []string{k.due, k.records, k.leased}, taskID(message), encoded, ceilMillis(due)).Int()
 	if err == nil {
 		return nil
 	}

@@ -20,30 +20,46 @@ type claimedTask struct {
 }
 
 var claimScript = redis.NewScript(`
+local function valid(key, expected)
+  local kind = redis.call('TYPE', key).ok
+  return kind == 'none' or kind == expected
+end
+if not valid(KEYS[1], 'zset') or not valid(KEYS[2], 'zset') or not valid(KEYS[3], 'hash') or not valid(KEYS[4], 'hash') then
+  return redis.error_reply('MQ_DELAY_BAD_KEY_TYPE')
+end
 local clock = redis.call('TIME')
 local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
 local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'LIMIT', 0, 1)
 if #expired > 0 then
   local id = expired[1]
-  redis.call('ZREM', KEYS[2], id)
-  redis.call('HDEL', KEYS[4], id)
-  redis.call('ZADD', KEYS[1], now, id)
+  local record = redis.call('HGET', KEYS[3], id)
+  if not record then return redis.error_reply('MQ_DELAY_MISSING_RECORD') end
+  redis.call('HSET', KEYS[4], id, ARGV[2])
+  redis.call('ZADD', KEYS[2], now + tonumber(ARGV[1]), id)
+  return {id, record}
 end
 local due = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'LIMIT', 0, 1)
 if #due == 0 then return nil end
 local id = due[1]
 local record = redis.call('HGET', KEYS[3], id)
 if not record then return redis.error_reply('MQ_DELAY_MISSING_RECORD') end
-redis.call('ZREM', KEYS[1], id)
-redis.call('ZADD', KEYS[2], now + tonumber(ARGV[1]), id)
 redis.call('HSET', KEYS[4], id, ARGV[2])
+redis.call('ZADD', KEYS[2], now + tonumber(ARGV[1]), id)
+redis.call('ZREM', KEYS[1], id)
 return {id, record}`)
 
 var completeScript = redis.NewScript(`
+local function valid(key, expected)
+  local kind = redis.call('TYPE', key).ok
+  return kind == 'none' or kind == expected
+end
+if not valid(KEYS[1], 'zset') or not valid(KEYS[2], 'hash') or not valid(KEYS[3], 'hash') then
+  return redis.error_reply('MQ_DELAY_BAD_KEY_TYPE')
+end
 if redis.call('HGET', KEYS[3], ARGV[1]) ~= ARGV[2] then return 0 end
-redis.call('HDEL', KEYS[2], ARGV[1])
-redis.call('HDEL', KEYS[3], ARGV[1])
 redis.call('ZREM', KEYS[1], ARGV[1])
+redis.call('HDEL', KEYS[3], ARGV[1])
+redis.call('HDEL', KEYS[2], ARGV[1])
 return 1`)
 
 func (s *Scheduler) claimOne(ctx context.Context, lane int) (*claimedTask, error) {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -66,6 +68,10 @@ func testRedis(t *testing.T) *redis.Client {
 	client := redis.NewClient(&redis.Options{Addr: addr})
 	if err := client.Ping(context.Background()).Err(); err != nil {
 		t.Fatal(err)
+	}
+	settings, err := client.ConfigGet(context.Background(), "append*").Result()
+	if err != nil || settings["appendonly"] != "yes" || settings["appendfsync"] != "always" {
+		t.Fatalf("delay integration requires AOF appendfsync=always: %+v, %v", settings, err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
 	return client
@@ -409,4 +415,174 @@ func TestCloseWaitsForScheduledPublish(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("closed worker did not stop")
 	}
+}
+
+func TestPublishRetryRepairsMissingDueIndex(t *testing.T) {
+	client := testRedis(t)
+	a, _ := New(client, targetStub{}, Options{Prefix: testPrefix(t), Shards: 1})
+	m, _ := mq.NewMessage("partial-insert", []byte("payload"))
+	due := time.Now().Add(time.Hour)
+	encoded, err := encodeTask(m, due)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := a.keys(0)
+	if err := client.HSet(context.Background(), keys.records, taskID(m), encoded).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.PublishAt(context.Background(), m, due); err != nil {
+		t.Fatal(err)
+	}
+	count, err := client.ZCard(context.Background(), keys.due).Result()
+	if err != nil || count != 1 {
+		t.Fatalf("retry did not restore due index: %d, %v", count, err)
+	}
+}
+
+func TestInsertWrongTypeDoesNotStrandTask(t *testing.T) {
+	client := testRedis(t)
+	a, _ := New(client, targetStub{}, Options{Prefix: testPrefix(t), Shards: 1})
+	m, _ := mq.NewMessage("bad-due-key", []byte("payload"))
+	due := time.Now().Add(time.Hour)
+	keys := a.keys(0)
+	if err := client.Set(context.Background(), keys.due, "wrong-type", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.PublishAt(context.Background(), m, due); !mq.IsOutcomeUnknown(err) {
+		t.Fatalf("bad due key outcome = %v", err)
+	}
+	if err := client.Del(context.Background(), keys.due).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.PublishAt(context.Background(), m, due); err != nil {
+		t.Fatal(err)
+	}
+	count, err := client.ZCard(context.Background(), keys.due).Result()
+	if err != nil || count != 1 {
+		t.Fatalf("task stranded after retry: %d, %v", count, err)
+	}
+}
+
+func TestRunCancellationWhileIdle(t *testing.T) {
+	client := testRedis(t)
+	a, _ := New(client, targetStub{}, Options{Prefix: testPrefix(t), Shards: 1, PollInterval: time.Second})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("idle worker ignored cancellation")
+	}
+}
+
+func TestLaneKeysShareClusterHashTag(t *testing.T) {
+	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
+	defer client.Close()
+	a, _ := New(client, targetStub{}, Options{Prefix: "mq:test:cluster", Shards: 4})
+	for lane := 0; lane < 4; lane++ {
+		keys := a.keys(lane)
+		parts := []string{keys.due, keys.leased, keys.records, keys.tokens}
+		tag := "{" + a.options.Prefix + ":" + strconv.Itoa(lane) + "}"
+		for _, key := range parts {
+			if !strings.HasPrefix(key, tag) {
+				t.Fatalf("key %q lacks lane hash tag %q", key, tag)
+			}
+		}
+	}
+}
+
+func TestClusterClientRouting(t *testing.T) {
+	addresses := os.Getenv("MQ_TEST_REDIS_CLUSTER_ADDR")
+	options := &redis.ClusterOptions{}
+	if addresses != "" {
+		options.Addrs = strings.Split(addresses, ",")
+	} else {
+		standalone := os.Getenv("MQ_TEST_REDIS_ADDR")
+		if standalone == "" {
+			t.Skip("set MQ_TEST_REDIS_ADDR for ClusterClient routing smoke test or MQ_TEST_REDIS_CLUSTER_ADDR for real cluster")
+		}
+		options.Addrs = []string{standalone}
+		options.ClusterSlots = func(context.Context) ([]redis.ClusterSlot, error) {
+			return []redis.ClusterSlot{{Start: 0, End: 16383, Nodes: []redis.ClusterNode{{Addr: standalone}}}}, nil
+		}
+	}
+	client := redis.NewClusterClient(options)
+	defer client.Close()
+	a, err := New(client, targetStub{}, Options{Prefix: testPrefix(t), Shards: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := mq.NewMessage("cluster", nil)
+	if err := a.PublishAt(context.Background(), m, time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := a.claimOne(context.Background(), a.laneFor(m))
+	if err != nil || claim == nil || claim.message.ID != m.ID {
+		t.Fatalf("cluster claim = %+v, %v", claim, err)
+	}
+	complete, err := a.complete(context.Background(), claim)
+	if err != nil || !complete {
+		t.Fatalf("cluster complete = %t, %v", complete, err)
+	}
+}
+
+func TestClaimErrorsPreserveRecoverableIndex(t *testing.T) {
+	t.Run("fresh due with bad leased key", func(t *testing.T) {
+		client := testRedis(t)
+		a, _ := New(client, targetStub{}, Options{Prefix: testPrefix(t), Shards: 1})
+		m, _ := mq.NewMessage("bad-leased-key", nil)
+		if err := a.PublishAt(context.Background(), m, time.Now().Add(-time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		keys := a.keys(0)
+		if err := client.Set(context.Background(), keys.leased, "wrong-type", 0).Err(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := a.claimOne(context.Background(), 0); err == nil {
+			t.Fatal("bad leased key accepted")
+		}
+		if err := client.Del(context.Background(), keys.leased).Err(); err != nil {
+			t.Fatal(err)
+		}
+		claim, err := a.claimOne(context.Background(), 0)
+		if err != nil || claim == nil || claim.message.ID != m.ID {
+			t.Fatalf("due task stranded: %+v, %v", claim, err)
+		}
+	})
+	t.Run("expired lease with bad token key", func(t *testing.T) {
+		client := testRedis(t)
+		a, _ := New(client, targetStub{}, Options{Prefix: testPrefix(t), Shards: 1, LeaseDuration: 30 * time.Millisecond})
+		m, _ := mq.NewMessage("bad-token-key", nil)
+		if err := a.PublishAt(context.Background(), m, time.Now().Add(-time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		first, err := a.claimOne(context.Background(), 0)
+		if err != nil || first == nil {
+			t.Fatalf("initial claim: %+v, %v", first, err)
+		}
+		keys := a.keys(0)
+		if err := client.Del(context.Background(), keys.tokens).Err(); err != nil {
+			t.Fatal(err)
+		}
+		if err := client.Set(context.Background(), keys.tokens, "wrong-type", 0).Err(); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(50 * time.Millisecond)
+		if _, err := a.claimOne(context.Background(), 0); err == nil {
+			t.Fatal("bad token key accepted")
+		}
+		if err := client.Del(context.Background(), keys.tokens).Err(); err != nil {
+			t.Fatal(err)
+		}
+		recovered, err := a.claimOne(context.Background(), 0)
+		if err != nil || recovered == nil || recovered.message.ID != m.ID {
+			t.Fatalf("expired task stranded: %+v, %v", recovered, err)
+		}
+	})
 }
