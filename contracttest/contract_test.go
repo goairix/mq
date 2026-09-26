@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
+
+	mq "github.com/goairix/mq/v2"
 )
 
 func TestInvalidResultRequiresHandlerAndNonCancellationError(t *testing.T) {
@@ -25,5 +28,14 @@ func TestInvalidResultRequiresHandlerAndNonCancellationError(t *testing.T) {
 				t.Fatalf("got %t, want %t", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestAllSuccessRejectsNonAcknowledgingFixture(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	probe := func(context.Context, mq.Subscription) (int64, error) { return 2, nil }
+	if err := waitOutstandingZero(ctx, probe, mq.Subscription{Topic: "broken", Name: "group"}); err == nil {
+		t.Fatal("non-acknowledging fixture was accepted")
 	}
 }

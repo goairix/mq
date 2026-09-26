@@ -156,6 +156,156 @@ func TestConsumerReclaimsPendingAfterCancel(t *testing.T) {
 	}
 }
 
+func TestConsumerDrainsCompletedHandlerAfterCancel(t *testing.T) {
+	client := integrationClient(t)
+	opts := consumeOptions(t)
+	opts.DrainTimeout = time.Second
+	a, _ := New(client, opts)
+	sub := mq.Subscription{Topic: "drain", Name: "group"}
+	m, _ := mq.NewMessage(sub.Topic, []byte("work"))
+	if err := a.Publish(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		done <- a.Run(ctx, sub, func(handlerCtx context.Context, _ mq.Message) error {
+			close(entered)
+			select {
+			case <-release:
+				return nil
+			case <-handlerCtx.Done():
+				return handlerCtx.Err()
+			}
+		})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not enter")
+	}
+	cancel()
+	close(release)
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumer did not drain")
+	}
+	pending, err := client.XPending(context.Background(), a.streamKey(sub.Topic), sub.Name).Result()
+	if err != nil || pending.Count != 0 {
+		t.Fatalf("pending after drain = %+v, %v", pending, err)
+	}
+}
+
+func TestLongBlockCancellationIsBounded(t *testing.T) {
+	client := integrationClient(t)
+	opts := consumeOptions(t)
+	opts.Block = time.Minute
+	a, _ := New(client, opts)
+	sub := mq.Subscription{Topic: "long-block", Name: "group"}
+	if err := a.Prepare(context.Background(), sub); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx, sub, func(context.Context, mq.Message) error { return nil }) }()
+	time.Sleep(100 * time.Millisecond)
+	start := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v", err)
+		}
+		if time.Since(start) > time.Second {
+			t.Fatal("long block delayed cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("long block delayed cancellation")
+	}
+}
+
+func TestConsumerDrainDeadlineLeavesMessagePending(t *testing.T) {
+	client := integrationClient(t)
+	opts := consumeOptions(t)
+	opts.DrainTimeout = 30 * time.Millisecond
+	a, _ := New(client, opts)
+	sub := mq.Subscription{Topic: "drain-expiry", Name: "group"}
+	m, _ := mq.NewMessage(sub.Topic, []byte("work"))
+	if err := a.Publish(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	entered, done := make(chan struct{}), make(chan error, 1)
+	go func() {
+		done <- a.Run(ctx, sub, func(handlerCtx context.Context, _ mq.Message) error {
+			close(entered)
+			<-handlerCtx.Done()
+			return handlerCtx.Err()
+		})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not enter")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("drain timeout not enforced")
+	}
+	pending, err := client.XPending(context.Background(), a.streamKey(sub.Topic), sub.Name).Result()
+	if err != nil || pending.Count != 1 {
+		t.Fatalf("pending after drain expiry = %+v, %v", pending, err)
+	}
+}
+
+func TestCloseWaitsForActiveHandlerAndAck(t *testing.T) {
+	client := integrationClient(t)
+	a, _ := New(client, consumeOptions(t))
+	sub := mq.Subscription{Topic: "close-drain", Name: "group"}
+	m, _ := mq.NewMessage(sub.Topic, []byte("work"))
+	if err := a.Publish(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		done <- a.Run(ctx, sub, func(context.Context, mq.Message) error { close(entered); <-release; return nil })
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not enter")
+	}
+	shortCtx, stop := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer stop()
+	if err := a.Close(shortCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("premature Close = %v", err)
+	}
+	close(release)
+	if err := a.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("consumer did not stop after Close")
+	}
+	pending, err := client.XPending(context.Background(), a.streamKey(sub.Topic), sub.Name).Result()
+	if err != nil || pending.Count != 0 {
+		t.Fatalf("pending after Close = %+v, %v", pending, err)
+	}
+}
+
 type failDeadLetterClient struct{ redis.UniversalClient }
 
 func (c failDeadLetterClient) XAdd(ctx context.Context, args *redis.XAddArgs) *redis.StringCmd {

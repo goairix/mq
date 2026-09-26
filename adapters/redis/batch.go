@@ -21,12 +21,16 @@ func (a *Adapter) RunBatch(ctx context.Context, sub mq.Subscription, options mq.
 	if err := a.Prepare(ctx, sub); err != nil {
 		return err
 	}
+	deliveryCtx, finish := a.deliveryContext(ctx)
+	defer finish()
 	consumer := a.options.Consumer + "-" + strconv.FormatUint(a.nextConsumer.Add(1), 10)
 	stream := a.streamKey(sub.Topic)
 	claimStart := "0-0"
 	var pending []redis.XMessage
 	var attempt int
-	readCount := min(a.options.ReadCount, int64(options.MaxMessages))
+	// Redis returns full payloads without a byte cap. Fetch one at a time so
+	// a blocked handler cannot retain ReadCount arbitrarily large envelopes.
+	readCount := int64(1)
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -64,6 +68,17 @@ func (a *Adapter) RunBatch(ctx context.Context, sub mq.Subscription, options mq.
 		for {
 			for len(pending) > len(selected) && len(selected) < options.MaxMessages {
 				entry := pending[len(selected)]
+				if entry.Values == nil {
+					reloaded, claimErr := a.client.XClaim(ctx, &redis.XClaimArgs{Stream: stream, Group: sub.Name, Consumer: consumer, Messages: []string{entry.ID}}).Result()
+					if claimErr != nil {
+						return fmt.Errorf("reload pending message %s: %w", entry.ID, claimErr)
+					}
+					if len(reloaded) != 1 {
+						return fmt.Errorf("pending message %s disappeared before reload", entry.ID)
+					}
+					entry = reloaded[0]
+					pending[len(selected)] = entry
+				}
 				message, err := decode(entry)
 				if err != nil || message.Topic != sub.Topic {
 					if err == nil {
@@ -87,6 +102,9 @@ func (a *Adapter) RunBatch(ctx context.Context, sub mq.Subscription, options mq.
 					return fmt.Errorf("message %s size %d exceeds MaxInFlightBytes %d", message.ID, size, options.MaxInFlightBytes)
 				}
 				if len(selected) > 0 && (totalBytes+size > options.MaxBytes || totalBytes+size > options.MaxInFlightBytes) {
+					// The entry remains pending in Redis. Retain only its ID
+					// while the current batch is handled; reload it later.
+					pending[len(selected)].Values = nil
 					limitReached = true
 					break
 				}
@@ -123,40 +141,16 @@ func (a *Adapter) RunBatch(ctx context.Context, sub mq.Subscription, options mq.
 			}
 			return errors.New("Redis batch could not select pending messages")
 		}
-		results, handlerErr := handler(ctx, messages)
-		if handlerErr == nil && results != nil && len(results) != len(messages) {
-			return fmt.Errorf("batch handler returned %d results for %d messages", len(results), len(messages))
+		failed, retryAll, err := a.processBatch(ctx, deliveryCtx, sub, selected, messages, handler)
+		if err != nil {
+			return err
 		}
-		if handlerErr != nil {
+		if retryAll {
 			attempt++
 			if err := waitRetry(ctx, a.retryDelay(attempt)); err != nil {
 				return err
 			}
 			continue
-		}
-		ackIDs := make([]string, 0, len(selected))
-		failed := make([]redis.XMessage, 0, len(selected))
-		for i, entry := range selected {
-			var result error
-			if results != nil {
-				result = results[i]
-			}
-			switch {
-			case result == nil:
-				ackIDs = append(ackIDs, entry.ID)
-			case mq.IsPermanent(result):
-				if err := a.deadLetter(ctx, sub, entry, messages[i], "permanent", result); err != nil {
-					return err
-				}
-				ackIDs = append(ackIDs, entry.ID)
-			default:
-				failed = append(failed, entry)
-			}
-		}
-		if len(ackIDs) > 0 {
-			if err := a.client.XAck(ctx, stream, sub.Name, ackIDs...).Err(); err != nil {
-				return fmt.Errorf("ACK Redis batch: %w", err)
-			}
 		}
 		pending = append(failed, pending[len(selected):]...)
 		if len(failed) > 0 {
@@ -170,8 +164,50 @@ func (a *Adapter) RunBatch(ctx context.Context, sub mq.Subscription, options mq.
 	}
 }
 
+func (a *Adapter) processBatch(ctx, deliveryCtx context.Context, sub mq.Subscription, selected []redis.XMessage, messages []mq.Message, handler mq.BatchHandler) ([]redis.XMessage, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	if err := a.begin(); err != nil {
+		return nil, false, err
+	}
+	defer a.end()
+	results, handlerErr := handler(deliveryCtx, messages)
+	if handlerErr != nil {
+		return nil, true, nil
+	}
+	if results != nil && len(results) != len(messages) {
+		return nil, false, fmt.Errorf("batch handler returned %d results for %d messages", len(results), len(messages))
+	}
+	ackIDs := make([]string, 0, len(selected))
+	failed := make([]redis.XMessage, 0, len(selected))
+	for i, entry := range selected {
+		var result error
+		if results != nil {
+			result = results[i]
+		}
+		switch {
+		case result == nil:
+			ackIDs = append(ackIDs, entry.ID)
+		case mq.IsPermanent(result):
+			if err := a.deadLetter(deliveryCtx, sub, entry, messages[i], "permanent", result); err != nil {
+				return nil, false, err
+			}
+			ackIDs = append(ackIDs, entry.ID)
+		default:
+			failed = append(failed, entry)
+		}
+	}
+	if len(ackIDs) > 0 {
+		if err := a.client.XAck(deliveryCtx, a.streamKey(sub.Topic), sub.Name, ackIDs...).Err(); err != nil {
+			return nil, false, fmt.Errorf("ACK Redis batch: %w", err)
+		}
+	}
+	return failed, false, nil
+}
+
 func (a *Adapter) readNew(ctx context.Context, sub mq.Subscription, consumer string, count int64, block time.Duration) ([]redis.XMessage, error) {
-	streams, err := a.client.XReadGroup(ctx, &redis.XReadGroupArgs{Group: sub.Name, Consumer: consumer, Streams: []string{a.streamKey(sub.Topic), ">"}, Count: count, Block: block}).Result()
+	streams, err := a.client.XReadGroup(ctx, &redis.XReadGroupArgs{Group: sub.Name, Consumer: consumer, Streams: []string{a.streamKey(sub.Topic), ">"}, Count: count, Block: a.readBlock(block)}).Result()
 	if errors.Is(err, redis.Nil) {
 		return nil, nil
 	}

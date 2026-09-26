@@ -20,7 +20,15 @@ func TestPortableContract(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return contracttest.Transport{Publisher: adapter, Subscriber: adapter, BatchSubscriber: adapter, Prepare: adapter.Prepare}
+		return contracttest.Transport{Publisher: adapter, Subscriber: adapter, BatchSubscriber: adapter, Prepare: adapter.Prepare,
+			Outstanding: func(ctx context.Context, sub mq.Subscription) (int64, error) {
+				info, err := client.XPending(ctx, adapter.streamKey(sub.Topic), sub.Name).Result()
+				if err != nil {
+					return 0, err
+				}
+				return info.Count, nil
+			},
+		}
 	})
 }
 
@@ -247,5 +255,160 @@ func TestBatchByteLimitsAndMaxWait(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("MaxWait batch not delivered")
+	}
+}
+
+func TestBatchReadAheadRespectsByteLimit(t *testing.T) {
+	client := integrationClient(t)
+	a, _ := New(client, consumeOptions(t))
+	sub := mq.Subscription{Topic: "read-ahead", Name: "group"}
+	if err := a.Prepare(context.Background(), sub); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 12; i++ {
+		m := batchMessage(t, sub.Topic, strings.Repeat("x", 32<<10))
+		if err := a.Publish(context.Background(), m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	opts := mq.DefaultBatchOptions()
+	opts.MaxBytes, opts.MaxInFlightBytes, opts.MaxWait = 40<<10, 40<<10, 0
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	entered, release := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- a.RunBatch(ctx, sub, opts, func(context.Context, []mq.Message) ([]error, error) { close(entered); <-release; return nil, nil })
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("batch handler did not enter")
+	}
+	pending, err := client.XPending(context.Background(), a.streamKey(sub.Topic), sub.Name).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Count > 1 {
+		t.Fatalf("read ahead retained %d entries beyond byte limit", pending.Count)
+	}
+	cancel()
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("batch did not stop")
+	}
+}
+
+func TestBatchDrainAcknowledgesCompletion(t *testing.T) {
+	client := integrationClient(t)
+	opts := consumeOptions(t)
+	opts.DrainTimeout = time.Second
+	a, _ := New(client, opts)
+	sub := mq.Subscription{Topic: "batch-drain", Name: "group"}
+	m := batchMessage(t, sub.Topic, "work")
+	if err := a.Publish(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	batchOpts := mq.DefaultBatchOptions()
+	batchOpts.MaxWait = 0
+	ctx, cancel := context.WithCancel(context.Background())
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		done <- a.RunBatch(ctx, sub, batchOpts, func(handlerCtx context.Context, _ []mq.Message) ([]error, error) {
+			close(entered)
+			select {
+			case <-release:
+				return nil, nil
+			case <-handlerCtx.Done():
+				return nil, handlerCtx.Err()
+			}
+		})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("batch handler did not enter")
+	}
+	cancel()
+	close(release)
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunBatch = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("batch did not drain")
+	}
+	pending, err := client.XPending(context.Background(), a.streamKey(sub.Topic), sub.Name).Result()
+	if err != nil || pending.Count != 0 {
+		t.Fatalf("pending after batch drain = %+v, %v", pending, err)
+	}
+}
+
+func TestBatchLongBlockCancellationIsBounded(t *testing.T) {
+	client := integrationClient(t)
+	opts := consumeOptions(t)
+	opts.Block = time.Minute
+	a, _ := New(client, opts)
+	sub := mq.Subscription{Topic: "batch-long-block", Name: "group"}
+	if err := a.Prepare(context.Background(), sub); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- a.RunBatch(ctx, sub, mq.DefaultBatchOptions(), func(context.Context, []mq.Message) ([]error, error) { return nil, nil })
+	}()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunBatch = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("long block delayed batch cancellation")
+	}
+}
+
+func TestBatchReloadsOverflowPendingEntry(t *testing.T) {
+	client := integrationClient(t)
+	a, _ := New(client, consumeOptions(t))
+	sub := mq.Subscription{Topic: "overflow", Name: "group"}
+	if err := a.Prepare(context.Background(), sub); err != nil {
+		t.Fatal(err)
+	}
+	first := batchMessage(t, sub.Topic, strings.Repeat("a", 32<<10))
+	second := batchMessage(t, sub.Topic, strings.Repeat("b", 32<<10))
+	for _, m := range []mq.Message{first, second} {
+		if err := a.Publish(context.Background(), m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	opts := mq.DefaultBatchOptions()
+	opts.MaxBytes, opts.MaxInFlightBytes, opts.MaxWait = 40<<10, 40<<10, 100*time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	seen, done := make(chan string, 2), make(chan error, 1)
+	go func() {
+		done <- a.RunBatch(ctx, sub, opts, func(_ context.Context, batch []mq.Message) ([]error, error) {
+			if len(batch) != 1 {
+				return nil, errors.New("overflow batch size")
+			}
+			seen <- batch[0].ID
+			return nil, nil
+		})
+	}()
+	firstID, secondID := receiveID(t, seen), receiveID(t, seen)
+	if firstID != first.ID || secondID != second.ID {
+		t.Fatalf("overflow deliveries = %s, %s", firstID, secondID)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("batch did not stop")
 	}
 }

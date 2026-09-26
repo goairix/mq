@@ -24,6 +24,8 @@ func TestNewOptionsAndClose(t *testing.T) {
 		{ReadCount: -1},
 		{PublishBatchSize: -1},
 		{Block: -time.Second},
+		{Block: time.Nanosecond},
+		{DrainTimeout: -time.Second},
 		{ClaimIdle: -time.Second},
 		{RetryMin: -time.Second},
 		{RetryMin: 2 * time.Second, RetryMax: time.Second},
@@ -37,7 +39,7 @@ func TestNewOptionsAndClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if adapter.options.ReadCount <= 0 || adapter.options.Block <= 0 || adapter.options.ClaimIdle <= 0 || adapter.options.RetryMin <= 0 || adapter.options.RetryMax < adapter.options.RetryMin {
+	if adapter.options.ReadCount <= 0 || adapter.options.Block <= 0 || adapter.options.DrainTimeout <= 0 || adapter.options.ClaimIdle <= 0 || adapter.options.RetryMin <= 0 || adapter.options.RetryMax < adapter.options.RetryMin {
 		t.Fatalf("invalid defaults: %+v", adapter.options)
 	}
 	if err := adapter.Close(context.Background()); err != nil {

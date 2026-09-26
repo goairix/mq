@@ -207,6 +207,12 @@ func TestPortableContract(t *testing.T) {
 		}
 		return contracttest.Transport{
 			Publisher: b, Subscriber: b, BatchSubscriber: b,
+			Outstanding: func(_ context.Context, sub mq.Subscription) (int64, error) {
+				b.mu.Lock()
+				defer b.mu.Unlock()
+				topic, group := b.groupLocked(sub)
+				return int64(topic.base + uint64(len(topic.messages)) - group.next), nil
+			},
 			Backpressure: func(t *testing.T) {
 				limited, _ := New(1)
 				if err := limited.Publish(context.Background(), testMessage(t, "full")); err != nil {

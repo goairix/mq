@@ -33,10 +33,11 @@ go func() {
 
 - `Publish` 的成功是 Redis `XADD` 确认，不代表消费者已处理。连接故障后的结果可能未知；保留原消息 ID 重试，并在业务处理端按 ID 幂等。
 - 默认新建组从最早保留的消息开始；只有显式设置 `StartLatest` 才从当前末尾开始。可在发布前用 `Prepare` 建好订阅组。
-- 同一订阅名称的实例竞争处理，不同名称的订阅组分别消费。成功处理后 `XACK`。失败记录保留在 pending，失联实例的记录由 `XAUTOCLAIM` 接管；`ClaimIdle` 应大于正常处理耗时，避免过早的并发重投。
+- 同一订阅名称的实例竞争处理，不同名称的订阅组分别消费。成功处理后 `XACK`。失败记录保留在 pending，失联实例的记录由 `XAUTOCLAIM` 接管；`ClaimIdle` 应大于消息从预取到确认的最长正常停留时间。顺序处理时，这可能包含前面整个读取批次与重试的时间。
 - 永久失败先写入 `DeadLetterStream(sub)` 并等待 `XADD` 确认，再 `XACK` 原记录。死信写入失败时原记录仍 pending。死信写入成功与原记录 ACK 之间崩溃可能导致重复死信，处理方需按原 ID 去重。
-- 批量结果按每条处理，成功记录使用一次 `XACK` 提交。`MaxBytes` 按 `Message.SizeBytes()` 计算；单条超出软限制时单独交付，超出 `MaxInFlightBytes` 时返回错误且不调用 handler。`MaxWait` 收集稀疏到达的记录。
-- adapter 不关闭传入的 Redis client；调用方在停止消费者并关闭 adapter 后关闭 client。`Close` 会等待已开始的同步发布操作完成。
+- 批量结果按每条处理，成功记录使用一次 `XACK` 提交。`MaxBytes` 按 `Message.SizeBytes()` 计算；单条超出软限制时单独交付，超出 `MaxInFlightBytes` 时返回错误且不调用 handler。Redis 没有按字节限制 `XREADGROUP` 响应的参数，因此批量消费者逐条读取并按字节组成批次；已经被 Redis 标记为 pending、但放不进当前批次的下一条消息只暂存 ID，处理完当前批次后再读取完整内容。`MaxWait` 收集稀疏到达的记录。
+- 取消 `Run` 或 `RunBatch` 的 context 后停止取新消息。已进入的 handler 最多使用 `DrainTimeout`（默认 30 秒）完成并确认；超时后 handler context 取消，未确认记录由 Redis 后续接管。handler 应尊重传入的 context。阻塞读取最多约 250 毫秒检查一次取消，即使 `Block` 设置得更长。
+- adapter 不关闭传入的 Redis client；调用方在停止消费者并关闭 adapter 后关闭 client。`Close` 会等待已开始的发布与消费确认操作完成，超过调用方提供的 context 期限则返回对应错误。
 
 ## 部署边界
 

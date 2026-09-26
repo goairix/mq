@@ -42,6 +42,8 @@ func (a *Adapter) Run(ctx context.Context, sub mq.Subscription, handler mq.Handl
 	if err := a.Prepare(ctx, sub); err != nil {
 		return err
 	}
+	deliveryCtx, finish := a.deliveryContext(ctx)
+	defer finish()
 	consumer := a.options.Consumer + "-" + strconv.FormatUint(a.nextConsumer.Add(1), 10)
 	stream := a.streamKey(sub.Topic)
 	claimStart := "0-0"
@@ -63,13 +65,13 @@ func (a *Adapter) Run(ctx context.Context, sub mq.Subscription, handler mq.Handl
 		}
 		if len(claimed) > 0 {
 			for _, entry := range claimed {
-				if err := a.handleEntry(ctx, sub, entry, handler); err != nil {
+				if err := a.deliverEntry(ctx, deliveryCtx, sub, entry, handler); err != nil {
 					return err
 				}
 			}
 			continue
 		}
-		streams, err := a.client.XReadGroup(ctx, &redis.XReadGroupArgs{Group: sub.Name, Consumer: consumer, Streams: []string{stream, ">"}, Count: a.options.ReadCount, Block: a.options.Block}).Result()
+		streams, err := a.client.XReadGroup(ctx, &redis.XReadGroupArgs{Group: sub.Name, Consumer: consumer, Streams: []string{stream, ">"}, Count: a.options.ReadCount, Block: a.readBlock(a.options.Block)}).Result()
 		if errors.Is(err, redis.Nil) {
 			continue
 		}
@@ -81,7 +83,7 @@ func (a *Adapter) Run(ctx context.Context, sub mq.Subscription, handler mq.Handl
 		}
 		for _, group := range streams {
 			for _, entry := range group.Messages {
-				if err := a.handleEntry(ctx, sub, entry, handler); err != nil {
+				if err := a.deliverEntry(ctx, deliveryCtx, sub, entry, handler); err != nil {
 					return err
 				}
 			}
@@ -89,39 +91,69 @@ func (a *Adapter) Run(ctx context.Context, sub mq.Subscription, handler mq.Handl
 	}
 }
 
-func (a *Adapter) handleEntry(ctx context.Context, sub mq.Subscription, entry redis.XMessage, handler mq.Handler) error {
+func (a *Adapter) deliverEntry(ctx, deliveryCtx context.Context, sub mq.Subscription, entry redis.XMessage, handler mq.Handler) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := a.begin(); err != nil {
+		return err
+	}
+	defer a.end()
+	return a.handleEntry(ctx, deliveryCtx, sub, entry, handler)
+}
+
+func (a *Adapter) handleEntry(ctx, deliveryCtx context.Context, sub mq.Subscription, entry redis.XMessage, handler mq.Handler) error {
 	message, err := decode(entry)
 	if err != nil {
-		if writeErr := a.deadLetter(ctx, sub, entry, mq.Message{}, "invalid-envelope", err); writeErr != nil {
+		if writeErr := a.deadLetter(deliveryCtx, sub, entry, mq.Message{}, "invalid-envelope", err); writeErr != nil {
 			return writeErr
 		}
-		return a.ack(ctx, sub, entry.ID)
+		return a.ack(deliveryCtx, sub, entry.ID)
 	}
 	if message.Topic != sub.Topic {
-		if writeErr := a.deadLetter(ctx, sub, entry, message, "wrong-topic", errors.New("message topic differs from stream topic")); writeErr != nil {
+		if writeErr := a.deadLetter(deliveryCtx, sub, entry, message, "wrong-topic", errors.New("message topic differs from stream topic")); writeErr != nil {
 			return writeErr
 		}
-		return a.ack(ctx, sub, entry.ID)
+		return a.ack(deliveryCtx, sub, entry.ID)
 	}
 	for attempt := 1; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		err := handler(ctx, message)
+		err := handler(deliveryCtx, message)
 		switch {
 		case err == nil:
-			return a.ack(ctx, sub, entry.ID)
+			return a.ack(deliveryCtx, sub, entry.ID)
 		case mq.IsPermanent(err):
-			if writeErr := a.deadLetter(ctx, sub, entry, message, "permanent", err); writeErr != nil {
+			if writeErr := a.deadLetter(deliveryCtx, sub, entry, message, "permanent", err); writeErr != nil {
 				return writeErr
 			}
-			return a.ack(ctx, sub, entry.ID)
+			return a.ack(deliveryCtx, sub, entry.ID)
 		default:
 			if waitErr := waitRetry(ctx, a.retryDelay(attempt)); waitErr != nil {
 				return waitErr
 			}
 		}
 	}
+}
+
+func (a *Adapter) deliveryContext(parent context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	stop := make(chan struct{})
+	go func() {
+		select {
+		case <-parent.Done():
+			timer := time.NewTimer(a.options.DrainTimeout)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				cancel()
+			case <-stop:
+			}
+		case <-stop:
+		}
+	}()
+	return ctx, func() { close(stop); cancel() }
 }
 
 func (a *Adapter) deadLetter(ctx context.Context, sub mq.Subscription, entry redis.XMessage, message mq.Message, category string, cause error) error {

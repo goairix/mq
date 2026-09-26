@@ -27,13 +27,14 @@ type Options struct {
 	ReadCount        int64
 	PublishBatchSize int
 	Block            time.Duration
+	DrainTimeout     time.Duration
 	ClaimIdle        time.Duration
 	RetryMin         time.Duration
 	RetryMax         time.Duration
 }
 
 func (o Options) withDefaults() (Options, error) {
-	if o.ReadCount < 0 || o.PublishBatchSize < 0 || o.Block < 0 || o.ClaimIdle < 0 || o.RetryMin < 0 || o.RetryMax < 0 {
+	if o.ReadCount < 0 || o.PublishBatchSize < 0 || o.Block < 0 || o.DrainTimeout < 0 || o.ClaimIdle < 0 || o.RetryMin < 0 || o.RetryMax < 0 {
 		return o, errors.New("negative Redis transport option")
 	}
 	if o.Prefix == "" {
@@ -50,6 +51,12 @@ func (o Options) withDefaults() (Options, error) {
 	}
 	if o.Block == 0 {
 		o.Block = time.Second
+	}
+	if o.Block < time.Millisecond {
+		return o, errors.New("Block must be at least one millisecond")
+	}
+	if o.DrainTimeout == 0 {
+		o.DrainTimeout = 30 * time.Second
 	}
 	if o.ClaimIdle == 0 {
 		o.ClaimIdle = 30 * time.Second
@@ -123,6 +130,12 @@ func (a *Adapter) isClosed() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.closed
+}
+
+// readBlock caps socket blocking because go-redis does not interrupt an
+// already-blocked XREADGROUP promptly when its context is canceled.
+func (a *Adapter) readBlock(requested time.Duration) time.Duration {
+	return min(requested, 250*time.Millisecond)
 }
 
 func (a *Adapter) Close(ctx context.Context) error {

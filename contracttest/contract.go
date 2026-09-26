@@ -18,6 +18,7 @@ type Transport struct {
 	Subscriber      mq.Subscriber
 	BatchSubscriber mq.BatchSubscriber
 	Prepare         func(context.Context, mq.Subscription) error
+	Outstanding     func(context.Context, mq.Subscription) (int64, error)
 	Backpressure    func(*testing.T)
 }
 
@@ -32,7 +33,7 @@ func topic(t *testing.T) string {
 func fixture(t *testing.T, factory Factory) Transport {
 	t.Helper()
 	f := factory(t)
-	if f.Publisher == nil || f.Subscriber == nil || f.BatchSubscriber == nil {
+	if f.Publisher == nil || f.Subscriber == nil || f.BatchSubscriber == nil || f.Outstanding == nil {
 		t.Fatal("factory omitted a required transport")
 	}
 	t.Cleanup(func() {
@@ -43,6 +44,25 @@ func fixture(t *testing.T, factory Factory) Transport {
 		}
 	})
 	return f
+}
+
+func waitOutstandingZero(ctx context.Context, probe func(context.Context, mq.Subscription) (int64, error), sub mq.Subscription) error {
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		count, err := probe(ctx, sub)
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%d messages remain unacknowledged: %w", count, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func prepare(t *testing.T, f Transport, sub mq.Subscription) {
@@ -211,6 +231,11 @@ func Run(t *testing.T, factory Factory) {
 			return results, nil
 		})
 		receiveBoth(t, seen, first.ID, second.ID)
+		settleCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := waitOutstandingZero(settleCtx, f.Outstanding, sub); err != nil {
+			t.Fatal(err)
+		}
 	})
 	t.Run("batch all success", func(t *testing.T) {
 		f := fixture(t, factory)
@@ -226,6 +251,11 @@ func Run(t *testing.T, factory Factory) {
 			return nil, nil
 		})
 		receiveBoth(t, seen, first.ID, second.ID)
+		settleCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := waitOutstandingZero(settleCtx, f.Outstanding, sub); err != nil {
+			t.Fatal(err)
+		}
 	})
 	t.Run("invalid batch result", func(t *testing.T) {
 		f := fixture(t, factory)
