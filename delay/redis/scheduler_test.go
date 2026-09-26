@@ -24,6 +24,22 @@ type recordingTarget struct {
 	seen     chan mq.Message
 }
 
+type blockingTarget struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingTarget) Publish(ctx context.Context, _ mq.Message) error {
+	close(b.entered)
+	select {
+	case <-b.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (*blockingTarget) Close(context.Context) error { return nil }
+
 func (r *recordingTarget) Publish(_ context.Context, m mq.Message) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -249,5 +265,148 @@ func TestTargetFailureRetainsScheduledTask(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("recovery worker did not stop")
+	}
+}
+
+func TestWorkerCancellationDrainsConfirmedPublication(t *testing.T) {
+	client := testRedis(t)
+	target := &blockingTarget{entered: make(chan struct{}), release: make(chan struct{})}
+	a, _ := New(client, target, Options{Prefix: testPrefix(t), Shards: 1, PollInterval: 10 * time.Millisecond, DrainTimeout: time.Second})
+	m, _ := mq.NewMessage("drain", []byte("payload"))
+	if err := a.PublishAt(context.Background(), m, time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+	select {
+	case <-target.entered:
+	case <-time.After(time.Second):
+		t.Fatal("target publish did not start")
+	}
+	cancel()
+	close(target.release)
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker did not drain")
+	}
+	count, err := client.HLen(context.Background(), a.keys(0).records).Result()
+	if err != nil || count != 0 {
+		t.Fatalf("confirmed task retained: %d, %v", count, err)
+	}
+}
+
+func TestWorkerDrainExpiryRetainsTask(t *testing.T) {
+	client := testRedis(t)
+	target := &blockingTarget{entered: make(chan struct{}), release: make(chan struct{})}
+	a, _ := New(client, target, Options{Prefix: testPrefix(t), Shards: 1, PollInterval: 10 * time.Millisecond, DrainTimeout: 30 * time.Millisecond})
+	m, _ := mq.NewMessage("expiry", []byte("payload"))
+	if err := a.PublishAt(context.Background(), m, time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+	select {
+	case <-target.entered:
+	case <-time.After(time.Second):
+		t.Fatal("target publish did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("drain timeout hidden")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("drain timeout not enforced")
+	}
+	count, err := client.HLen(context.Background(), a.keys(0).records).Result()
+	if err != nil || count != 1 {
+		t.Fatalf("unconfirmed task deleted: %d, %v", count, err)
+	}
+}
+
+func TestCrashAfterTargetConfirmCanDuplicate(t *testing.T) {
+	client := testRedis(t)
+	target := &recordingTarget{seen: make(chan mq.Message, 2)}
+	opts := Options{Prefix: testPrefix(t), Shards: 1, LeaseDuration: 40 * time.Millisecond, PollInterval: 10 * time.Millisecond}
+	first, _ := New(client, target, opts)
+	second, _ := New(client, target, opts)
+	m, _ := mq.NewMessage("crash-window", []byte("payload"))
+	if err := first.PublishAt(context.Background(), m, time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := first.claimOne(context.Background(), 0)
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %+v, %v", claim, err)
+	}
+	if err := target.Publish(context.Background(), claim.message); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate process death before its completion script.
+	time.Sleep(60 * time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- second.Run(ctx) }()
+	select {
+	case <-target.seen:
+	case <-time.After(time.Second):
+		t.Fatal("first target confirmation missing")
+	}
+	select {
+	case got := <-target.seen:
+		if got.ID != m.ID {
+			t.Fatal("duplicate changed message ID")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expired lease not redelivered")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not stop")
+	}
+}
+
+func TestCloseWaitsForScheduledPublish(t *testing.T) {
+	client := testRedis(t)
+	target := &blockingTarget{entered: make(chan struct{}), release: make(chan struct{})}
+	a, _ := New(client, target, Options{Prefix: testPrefix(t), Shards: 1, PollInterval: 10 * time.Millisecond})
+	m, _ := mq.NewMessage("close", []byte("payload"))
+	if err := a.PublishAt(context.Background(), m, time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+	select {
+	case <-target.entered:
+	case <-time.After(time.Second):
+		t.Fatal("target did not enter")
+	}
+	short, stop := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer stop()
+	if err := a.Close(short); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close returned early: %v", err)
+	}
+	close(target.release)
+	if err := a.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, mq.ErrClosed) {
+			t.Fatalf("Run after Close = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("closed worker did not stop")
 	}
 }
