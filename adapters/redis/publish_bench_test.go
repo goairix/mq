@@ -2,8 +2,10 @@ package redisadapter
 
 import (
 	"context"
+	"net"
 	"os"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,10 +17,25 @@ import (
 // pipeline using the same client, stream, payload and XADD acknowledgement.
 func BenchmarkConfirmedBatch(b *testing.B) {
 	addr := os.Getenv("MQ_TEST_REDIS_ADDR")
-	if addr == "" {
-		b.Skip("set MQ_TEST_REDIS_ADDR")
+	clusterAddresses := os.Getenv("MQ_TEST_REDIS_CLUSTER_ADDR")
+	if addr == "" && clusterAddresses == "" {
+		b.Skip("set MQ_TEST_REDIS_ADDR or MQ_TEST_REDIS_CLUSTER_ADDR")
 	}
-	client := redis.NewClient(&redis.Options{Addr: addr})
+	var client redis.UniversalClient
+	if clusterAddresses != "" {
+		client = redis.NewClusterClient(&redis.ClusterOptions{
+			Addrs: strings.Split(clusterAddresses, ","),
+			Dialer: func(ctx context.Context, network, address string) (net.Conn, error) {
+				_, port, err := net.SplitHostPort(address)
+				if err != nil {
+					return nil, err
+				}
+				return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort("127.0.0.1", port))
+			},
+		})
+	} else {
+		client = redis.NewClient(&redis.Options{Addr: addr})
+	}
 	defer client.Close()
 	adapter, err := New(client, Options{Prefix: "mq:v2:bench:" + time.Now().Format("150405.000000000")})
 	if err != nil {

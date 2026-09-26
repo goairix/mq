@@ -136,4 +136,6 @@ RabbitMQ 使用 `rabbitdelay.New(conn, rabbitMQ, rabbitdelay.Options{})`，先�
 
 所有生产 adapter 都是至少一次语义：成功处理后确认，死信目标确认后再确认源消息；确认窗口允许重复。Redis 单节点可靠性依赖 AOF，异步复制切换可能丢失已确认写入；RabbitMQ 单节点 quorum 队列可恢复重启但停机期间不可用，集群需要多数副本；Kafka 的副本、`min.insync.replicas` 和保留期由部署方配置。可靠延时表示应用进程重启后调度记录可恢复，不保证精确到期或单节点故障期间仍可服务。
 
+可重复运行的 Kafka、RabbitMQ 和 Redis 集群节点故障测试见 [tests/cluster/README.md](tests/cluster/README.md)。
+
 仓库 `go.work` 连接所有模块。本地测试示例：`go test ./...`、`go test ./adapters/redis/... ./delay/redis/...`；根模块依赖隔离可用 `GOWORK=off go list -m all` 验证。CI 配置覆盖 Redis 7.2/8.0、RabbitMQ 3.13.3、Kafka 4.0.2/4.1.2、Memory 和 OTel。详细设计见 [v2 架构文档](docs/superpowers/specs/2026-09-25-mq-v2-architecture-design.md)，标签顺序见 [发布清单](docs/RELEASING_V2.md)。

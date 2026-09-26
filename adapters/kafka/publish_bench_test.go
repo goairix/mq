@@ -33,6 +33,16 @@ func BenchmarkConfirmedBatch(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+	// Resolve metadata and establish broker connections before either measured
+	// path. On a fresh cluster this can otherwise consume the full benchtime
+	// in the first adapter iteration while the direct path gets warm sockets.
+	warmCtx, warmCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer warmCancel()
+	for _, result := range a.PublishBatch(warmCtx, messages) {
+		if result.Err != nil {
+			b.Fatalf("prewarm confirmed Kafka publish: %v", result.Err)
+		}
+	}
 	measure := func(b *testing.B, publish func(context.Context) error) {
 		b.SetBytes(int64(len(messages) * 1024))
 		b.ReportAllocs()

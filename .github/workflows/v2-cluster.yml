@@ -1,0 +1,44 @@
+name: v2 cluster failover
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Cluster test mode
+        required: true
+        default: failover
+        type: choice
+        options:
+          - failover
+          - bench
+      backend:
+        description: Cluster scenario to run
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - kafka
+          - rabbitmq
+          - redis
+
+permissions:
+  contents: read
+
+jobs:
+  failover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: '**/go.sum'
+      - name: Run disposable broker cluster tests
+        run: |
+          if [ '${{ inputs.mode }}' = bench ]; then
+            bash tests/cluster/run.sh bench '${{ inputs.backend }}'
+          else
+            bash tests/cluster/run.sh '${{ inputs.backend }}'
+          fi
