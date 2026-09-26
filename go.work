@@ -4,6 +4,7 @@ use (
 	.
 	./adapters/memory
 	./adapters/redis
+	./adapters/rabbitmq
 	./delay/redis
 )
 
