@@ -4,6 +4,7 @@ use (
 	.
 	./adapters/memory
 	./adapters/redis
+	./delay/redis
 )
 
 // Keep the unpublished local root version resolvable for workspace graph tools.
