@@ -67,12 +67,16 @@ func (o Options) withDefaults() (Options, error) {
 
 // Adapter owns AMQP channels opened on the caller-owned connection.
 type Adapter struct {
-	conn    *amqp.Connection
-	options Options
-	mu      sync.Mutex
-	closed  bool
-	active  int
-	drained chan struct{}
+	conn      *amqp.Connection
+	options   Options
+	mu        sync.Mutex
+	closed    bool
+	active    int
+	drained   chan struct{}
+	closedCh  chan struct{}
+	poolOnce  sync.Once
+	pool      chan *publishChannel
+	poolClose sync.Once
 }
 
 func New(conn *amqp.Connection, options Options) (*Adapter, error) {
@@ -83,7 +87,7 @@ func New(conn *amqp.Connection, options Options) (*Adapter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Adapter{conn: conn, options: configured, drained: make(chan struct{})}, nil
+	return &Adapter{conn: conn, options: configured, drained: make(chan struct{}), closedCh: make(chan struct{})}, nil
 }
 
 func (a *Adapter) begin() error {
@@ -109,6 +113,7 @@ func (a *Adapter) Close(ctx context.Context) error {
 	a.mu.Lock()
 	if !a.closed {
 		a.closed = true
+		close(a.closedCh)
 		if a.active == 0 {
 			close(a.drained)
 		}
@@ -117,6 +122,15 @@ func (a *Adapter) Close(ctx context.Context) error {
 	a.mu.Unlock()
 	select {
 	case <-drained:
+		a.poolClose.Do(func() {
+			if a.pool != nil {
+				for i := 0; i < a.options.PublishChannels; i++ {
+					if slot := <-a.pool; slot != nil {
+						_ = slot.ch.Close()
+					}
+				}
+			}
+		})
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

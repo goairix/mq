@@ -14,7 +14,7 @@ func encode(message mq.Message) amqp.Publishing {
 	headers := amqp.Table{
 		"mq.v":            int32(1),
 		"mq.topic":        message.Topic,
-		"mq.key":          append([]byte(nil), message.Key...),
+		"mq.key":          append([]byte{}, message.Key...),
 		"mq.created.sec":  message.CreatedAt.Unix(),
 		"mq.created.nsec": int32(message.CreatedAt.Nanosecond()),
 	}
