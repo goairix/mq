@@ -41,7 +41,7 @@ func (o Options) withDefaults() (Options, error) {
 		return o, errors.New("invalid scheduler prefix")
 	}
 	if o.Shards == 0 {
-		o.Shards = 16
+		o.Shards = 1
 	}
 	if o.Shards > 4096 {
 		return o, errors.New("scheduler shards exceed 4096")

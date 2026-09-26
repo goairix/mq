@@ -111,11 +111,13 @@ err := batchSubscriber.RunBatch(ctx,
 // target 可以是 redisMQ 或 kafkaMQ；client 是配置 AOF 的 Redis client。
 scheduler, err := redisdelay.New(client, target, redisdelay.Options{})
 if err != nil { return err }
-go func() { workerErr <- scheduler.Run(workerCtx) }()
 err = scheduler.PublishAt(ctx, message, time.Now().Add(time.Hour))
+
+// 在少量独立 worker 实例中，用相同 Prefix/Shards 配置运行：
+// workerErr <- scheduler.Run(workerCtx)
 ```
 
-RabbitMQ 使用 `rabbitdelay.New(conn, rabbitMQ, rabbitdelay.Options{})`，先调用 `scheduler.Prepare(ctx)`，再运行至少一个 `scheduler.Run(workerCtx)`。Kafka 仅在使用延时时才需引入和运行 Redis 调度模块。延时调度数据的持久化、租约和高可用限制见对应子模块文档。
+RabbitMQ 使用 `rabbitdelay.New(conn, rabbitMQ, rabbitdelay.Options{})`，先调用 `scheduler.Prepare(ctx)`，再运行至少一个 `scheduler.Run(workerCtx)`。Kafka 仅在使用延时时才需引入和运行 Redis 调度模块；不要让每个 API 副本都启动调度 worker。延时调度数据的持久化、租约、轮询压力和高可用限制见对应子模块文档。
 
 ## 从 v1 迁移
 
