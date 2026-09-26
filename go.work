@@ -6,6 +6,7 @@ use (
 	./adapters/redis
 	./adapters/rabbitmq
 	./delay/redis
+	./delay/rabbitmq
 )
 
 // Keep the unpublished local root version resolvable for workspace graph tools.
