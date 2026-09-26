@@ -117,10 +117,7 @@ func (a *Adapter) RunBatch(ctx context.Context, sub mq.Subscription, options mq.
 			if totalBytes >= options.MaxBytes {
 				break
 			}
-			if options.MaxWait == 0 {
-				break
-			}
-			if !time.Now().Before(deadline) {
+			if options.MaxWait > 0 && !time.Now().Before(deadline) {
 				break
 			}
 		}
@@ -131,19 +128,25 @@ func (a *Adapter) RunBatch(ctx context.Context, sub mq.Subscription, options mq.
 			return err
 		}
 		results, handlerErr := handler(deliveryCtx, messages)
+		if stopErr := a.deliveryExpired(ctx, deliveryCtx); stopErr != nil {
+			return stopErr
+		}
 		if handlerErr == nil && results != nil && len(results) != len(messages) {
 			return fmt.Errorf("batch handler returned %d results for %d messages", len(results), len(messages))
 		}
 		if handlerErr != nil {
 			pending = append(selected, pending...)
 			attempt++
-			if err := waitRetry(ctx, a.retryDelay(attempt)); err != nil {
+			if err := a.waitRetry(ctx, a.retryDelay(attempt)); err != nil {
 				return err
 			}
 			continue
 		}
 		var failed []amqp.Delivery
 		for i, delivery := range selected {
+			if stopErr := a.deliveryExpired(ctx, deliveryCtx); stopErr != nil {
+				return stopErr
+			}
 			var result error
 			if results != nil {
 				result = results[i]
@@ -167,7 +170,7 @@ func (a *Adapter) RunBatch(ctx context.Context, sub mq.Subscription, options mq.
 		pending = append(failed, pending...)
 		if len(failed) > 0 {
 			attempt++
-			if err := waitRetry(ctx, a.retryDelay(attempt)); err != nil {
+			if err := a.waitRetry(ctx, a.retryDelay(attempt)); err != nil {
 				return err
 			}
 		} else {

@@ -85,3 +85,31 @@ func TestPublishClosedConnectionIsUnknown(t *testing.T) {
 		t.Fatalf("closed connection outcome = %v", err)
 	}
 }
+
+func TestPublishByteBudgetRejectsOversizeAndContinues(t *testing.T) {
+	conn := rabbitConnection(t)
+	a, err := New(conn, Options{Prefix: "mq-v2-publish-budget-" + time.Now().Format("150405.000000000"), MaxPublishBytes: 256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close(context.Background())
+	sub := mq.Subscription{Topic: "budget", Name: "group"}
+	if err := a.Prepare(context.Background(), sub); err != nil {
+		t.Fatal(err)
+	}
+	tooLarge, _ := mq.NewMessage(sub.Topic, make([]byte, 1024))
+	small, _ := mq.NewMessage(sub.Topic, []byte("ok"))
+	results := a.PublishBatch(context.Background(), []mq.Message{tooLarge, small})
+	if results[0].State != mq.PublishRejected || results[1].State != mq.PublishAccepted {
+		t.Fatalf("results = %+v", results)
+	}
+	ch, err := conn.Channel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ch.Close()
+	d, ok, err := ch.Get(a.queueName(sub), true)
+	if err != nil || !ok || d.MessageId != small.ID {
+		t.Fatalf("delivery = %v, %t, %v", d.MessageId, ok, err)
+	}
+}

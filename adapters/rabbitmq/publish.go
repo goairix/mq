@@ -94,8 +94,28 @@ func (a *Adapter) PublishBatch(ctx context.Context, messages []mq.Message) []mq.
 		return results
 	}
 	defer a.end()
-	for start := 0; start < len(messages); start += a.options.PublishBatchSize {
-		end := min(start+a.options.PublishBatchSize, len(messages))
+	for start := 0; start < len(messages); {
+		end := start
+		chunkBytes := 0
+		for end < len(messages) && end-start < a.options.PublishBatchSize {
+			size := messages[end].SizeBytes()
+			if size > a.options.MaxPublishBytes {
+				if end == start {
+					results[end] = mq.PublishResult{State: mq.PublishRejected, Err: fmt.Errorf("message size %d exceeds MaxPublishBytes %d", size, a.options.MaxPublishBytes)}
+					end++
+				}
+				break
+			}
+			if end > start && size > a.options.MaxPublishBytes-chunkBytes {
+				break
+			}
+			chunkBytes += size
+			end++
+		}
+		if results[start].Err != nil && end == start+1 {
+			start = end
+			continue
+		}
 		if err := ctx.Err(); err != nil {
 			for i := start; i < len(messages); i++ {
 				results[i] = mq.PublishResult{State: mq.PublishRejected, Err: err}
@@ -117,6 +137,7 @@ func (a *Adapter) PublishBatch(ctx context.Context, messages []mq.Message) []mq.
 					results[i] = mq.PublishResult{State: state, Err: wrapped}
 				}
 			}
+			start = end
 			continue
 		}
 		healthy := true
@@ -153,6 +174,7 @@ func (a *Adapter) PublishBatch(ctx context.Context, messages []mq.Message) []mq.
 				results[item.index] = mq.PublishResult{State: mq.PublishUnknown, Err: mq.OutcomeUnknown(errors.New("publishing channel failed before confirmation"))}
 			}
 			a.release(pc, false)
+			start = end
 			continue
 		}
 		for position, item := range pending {
@@ -195,6 +217,7 @@ func (a *Adapter) PublishBatch(ctx context.Context, messages []mq.Message) []mq.
 			}
 		}
 		a.release(pc, healthy)
+		start = end
 	}
 	return results
 }

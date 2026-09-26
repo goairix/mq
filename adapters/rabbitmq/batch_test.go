@@ -137,3 +137,96 @@ func TestBatchHardByteLimitRejectsBeforeHandler(t *testing.T) {
 		t.Fatalf("hard limit error = %v", err)
 	}
 }
+
+func TestBatchZeroWaitDrainsReadyMessages(t *testing.T) {
+	conn := rabbitConnection(t)
+	a, _ := New(conn, Options{Prefix: "mq-v2-zero-wait-" + time.Now().Format("150405.000000000")})
+	defer a.Close(context.Background())
+	sub := mq.Subscription{Topic: "batch-ready", Name: "group"}
+	if err := a.Prepare(context.Background(), sub); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		m, _ := mq.NewMessage(sub.Topic, []byte{byte(i)})
+		if err := a.Publish(context.Background(), m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	options := mq.DefaultBatchOptions()
+	options.MaxMessages = 3
+	options.MaxWait = 0
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sizes := make(chan int, 1)
+	go func() {
+		_ = a.RunBatch(ctx, sub, options, func(_ context.Context, messages []mq.Message) ([]error, error) {
+			sizes <- len(messages)
+			cancel()
+			return nil, nil
+		})
+	}()
+	select {
+	case n := <-sizes:
+		if n != 3 {
+			t.Fatalf("batch size = %d", n)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("batch missing")
+	}
+}
+
+func TestBatchDoesNotAckLateSuccess(t *testing.T) {
+	conn := rabbitConnection(t)
+	a, _ := New(conn, Options{Prefix: "mq-v2-batch-late-" + time.Now().Format("150405.000000000"), DrainTimeout: 20 * time.Millisecond})
+	defer a.Close(context.Background())
+	sub := mq.Subscription{Topic: "batch-late", Name: "group"}
+	if err := a.Prepare(context.Background(), sub); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := mq.NewMessage(sub.Topic, []byte("late"))
+	if err := a.Publish(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	options := mq.DefaultBatchOptions()
+	options.MaxWait = 0
+	go func() {
+		done <- a.RunBatch(ctx, sub, options, func(context.Context, []mq.Message) ([]error, error) { close(entered); <-release; return nil, nil })
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+	cancel()
+	time.Sleep(40 * time.Millisecond)
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("batch did not stop")
+	}
+	ch, err := conn.Channel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ch.Close()
+	deadline := time.Now().Add(time.Second)
+	for {
+		d, ok, err := ch.Get(a.queueName(sub), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			if d.MessageId != m.ID {
+				t.Fatal("wrong redelivery")
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("late batch success was ACKed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

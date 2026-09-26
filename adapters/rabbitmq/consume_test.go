@@ -285,3 +285,92 @@ func TestConsumerDrainExpiryRedelivers(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+func TestConsumerDoesNotAckLateSuccess(t *testing.T) {
+	conn := rabbitConnection(t)
+	a, _ := New(conn, Options{Prefix: "mq-v2-late-success-" + time.Now().Format("150405.000000000"), DrainTimeout: 20 * time.Millisecond})
+	defer a.Close(context.Background())
+	sub := mq.Subscription{Topic: "late", Name: "group"}
+	if err := a.Prepare(context.Background(), sub); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := mq.NewMessage(sub.Topic, []byte("late"))
+	if err := a.Publish(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		done <- a.Run(ctx, sub, func(context.Context, mq.Message) error { close(entered); <-release; return nil })
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+	cancel()
+	time.Sleep(40 * time.Millisecond)
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("consumer did not stop")
+	}
+	ch, err := conn.Channel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ch.Close()
+	deadline := time.Now().Add(time.Second)
+	for {
+		d, ok, err := ch.Get(a.queueName(sub), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			if d.MessageId != m.ID {
+				t.Fatal("wrong redelivery")
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("late success was ACKed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestCloseStopsTransientRetry(t *testing.T) {
+	conn := rabbitConnection(t)
+	a, _ := New(conn, Options{Prefix: "mq-v2-close-retry-" + time.Now().Format("150405.000000000"), RetryMin: time.Hour, RetryMax: time.Hour})
+	sub := mq.Subscription{Topic: "retry", Name: "group"}
+	if err := a.Prepare(context.Background(), sub); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := mq.NewMessage(sub.Topic, nil)
+	if err := a.Publish(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	entered, done := make(chan struct{}), make(chan error, 1)
+	go func() {
+		done <- a.Run(context.Background(), sub, func(context.Context, mq.Message) error { close(entered); return errors.New("retry") })
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := a.Close(closeCtx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, mq.ErrClosed) {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not stop")
+	}
+}

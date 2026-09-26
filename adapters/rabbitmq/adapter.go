@@ -19,6 +19,7 @@ type Options struct {
 	Exchange         string
 	PublishChannels  int
 	PublishBatchSize int
+	MaxPublishBytes  int
 	Prefetch         int
 	PollInterval     time.Duration
 	DrainTimeout     time.Duration
@@ -27,7 +28,7 @@ type Options struct {
 }
 
 func (o Options) withDefaults() (Options, error) {
-	if o.PublishChannels < 0 || o.PublishBatchSize < 0 || o.Prefetch < 0 || o.PollInterval < 0 || o.DrainTimeout < 0 || o.RetryMin < 0 || o.RetryMax < 0 {
+	if o.PublishChannels < 0 || o.PublishBatchSize < 0 || o.MaxPublishBytes < 0 || o.Prefetch < 0 || o.PollInterval < 0 || o.DrainTimeout < 0 || o.RetryMin < 0 || o.RetryMax < 0 {
 		return o, errors.New("negative RabbitMQ option")
 	}
 	if o.Prefix == "" {
@@ -47,6 +48,9 @@ func (o Options) withDefaults() (Options, error) {
 	}
 	if o.PublishBatchSize == 0 {
 		o.PublishBatchSize = 256
+	}
+	if o.MaxPublishBytes == 0 {
+		o.MaxPublishBytes = 8 << 20
 	}
 	if o.Prefetch == 0 {
 		o.Prefetch = 128
@@ -184,7 +188,7 @@ func (a *Adapter) Prepare(ctx context.Context, sub mq.Subscription) error {
 	if err := ch.ExchangeDeclare(a.options.Exchange, "topic", true, false, false, false, nil); err != nil {
 		return err
 	}
-	args := amqp.Table{"x-queue-type": "quorum"}
+	args := amqp.Table{"x-queue-type": "quorum", "x-overflow": "reject-publish"}
 	if _, err := ch.QueueDeclare(a.queueName(sub), true, false, false, false, args); err != nil {
 		return err
 	}

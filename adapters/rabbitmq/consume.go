@@ -79,7 +79,15 @@ func (a *Adapter) handleDelivery(runCtx, deliveryCtx context.Context, sub mq.Sub
 		if err := runCtx.Err(); err != nil {
 			return err
 		}
+		select {
+		case <-a.closedCh:
+			return mq.ErrClosed
+		default:
+		}
 		err := handler(deliveryCtx, message)
+		if stopErr := a.deliveryExpired(runCtx, deliveryCtx); stopErr != nil {
+			return stopErr
+		}
 		switch {
 		case err == nil:
 			return delivery.Ack(false)
@@ -89,7 +97,7 @@ func (a *Adapter) handleDelivery(runCtx, deliveryCtx context.Context, sub mq.Sub
 			}
 			return delivery.Ack(false)
 		default:
-			if waitErr := waitRetry(runCtx, a.retryDelay(attempt)); waitErr != nil {
+			if waitErr := a.waitRetry(runCtx, a.retryDelay(attempt)); waitErr != nil {
 				return waitErr
 			}
 		}
@@ -166,14 +174,31 @@ func (a *Adapter) retryDelay(attempt int) time.Duration {
 	return delay
 }
 
-func waitRetry(ctx context.Context, duration time.Duration) error {
+func (a *Adapter) waitRetry(ctx context.Context, duration time.Duration) error {
 	timer := time.NewTimer(duration)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-a.closedCh:
+		return mq.ErrClosed
 	case <-timer.C:
 		return nil
+	}
+}
+
+func (a *Adapter) deliveryExpired(runCtx, deliveryCtx context.Context) error {
+	if deliveryCtx.Err() == nil {
+		return nil
+	}
+	if err := runCtx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-a.closedCh:
+		return mq.ErrClosed
+	default:
+		return deliveryCtx.Err()
 	}
 }
 
@@ -183,13 +208,15 @@ func (a *Adapter) deliveryContext(parent context.Context) (context.Context, func
 	go func() {
 		select {
 		case <-parent.Done():
-			timer := time.NewTimer(a.options.DrainTimeout)
-			defer timer.Stop()
-			select {
-			case <-timer.C:
-				cancel()
-			case <-stop:
-			}
+		case <-a.closedCh:
+		case <-stop:
+			return
+		}
+		timer := time.NewTimer(a.options.DrainTimeout)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			cancel()
 		case <-stop:
 		}
 	}()
