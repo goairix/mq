@@ -4,6 +4,29 @@ MQ v2 是面向领域事件、任务和持续数据上报的 Go 消息库。它�
 
 根模块 `github.com/goairix/mq/v2` 仅依赖 Go 标准库，最低 Go 1.23。Kafka 和 OpenTelemetry 子模块要求 Go 1.25。仓库的 `go.work` 用于本地开发，不会让只使用根模块的应用引入 broker 客户端。
 
+## 先理解它怎么工作
+
+日常使用只需认识三个对象：
+
+1. `mq.Message` 是一条消息，包含 topic、消息 ID、payload 等数据。
+2. `mq.Publisher` 负责把消息写入 broker。Redis、RabbitMQ 或 Kafka adapter 是它的具体实现。
+3. `mq.Subscriber` 负责持续读取消息并调用你的 handler。handler 返回 `nil` 后 adapter 才确认消息；返回普通错误会重试。
+
+```text
+业务代码 ── Publish(Message) ──> 所选 adapter ──> Redis / RabbitMQ / Kafka
+业务 handler <── Run(Subscription, handler) <── 所选 adapter <── broker
+```
+
+根模块只规定调用方式，不负责连接 broker。程序启动时由你创建所选 adapter，再把它作为 `mq.Publisher` 或 `mq.Subscriber` 传给业务代码。v1 的统一工厂已经移除，因此无需配置或编译未选择的后端。批量、延时和 OTel 都是按需要额外使用的能力；初次接入可以先忽略它们。
+
+先运行不需要外部服务的 [完整 Memory 示例](adapters/memory/example/main.go)：
+
+```bash
+go run ./adapters/memory/example
+```
+
+它创建一个 `order.created` 消息，用 Memory adapter 发布，再以订阅名 `billing` 读取。输出是 `order.created: {"order_id":"123"}`。Memory 只为演示和测试保留消息；理解这条调用链后，把 `memory.New(16)` 换成所需生产 adapter 的构造过程即可。下面的模块表和示例说明各后端的连接与部署要求。
+
 ## 模块选择
 
 | 用途 | 模块路径 | 能力与条件 |
