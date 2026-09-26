@@ -66,13 +66,14 @@ type laneKeys struct{ due, leased, records, tokens string }
 // Scheduler stores delayed tasks and publishes due work through target.
 // The caller owns and closes both Redis client and target publisher.
 type Scheduler struct {
-	client  redis.UniversalClient
-	target  mq.Publisher
-	options Options
-	mu      sync.Mutex
-	closed  bool
-	active  int
-	drained chan struct{}
+	client   redis.UniversalClient
+	target   mq.Publisher
+	options  Options
+	mu       sync.Mutex
+	closed   bool
+	active   int
+	drained  chan struct{}
+	closedCh chan struct{}
 }
 
 func New(client redis.UniversalClient, target mq.Publisher, options Options) (*Scheduler, error) {
@@ -83,7 +84,7 @@ func New(client redis.UniversalClient, target mq.Publisher, options Options) (*S
 	if err != nil {
 		return nil, err
 	}
-	return &Scheduler{client: client, target: target, options: configured, drained: make(chan struct{})}, nil
+	return &Scheduler{client: client, target: target, options: configured, drained: make(chan struct{}), closedCh: make(chan struct{})}, nil
 }
 
 func isNil(value any) bool {
@@ -186,6 +187,7 @@ func (s *Scheduler) Close(ctx context.Context) error {
 	s.mu.Lock()
 	if !s.closed {
 		s.closed = true
+		close(s.closedCh)
 		if s.active == 0 {
 			close(s.drained)
 		}
