@@ -41,6 +41,6 @@ go func() {
 
 目前验证基线为 RabbitMQ 3.13.3。单节点的 durable quorum 队列可在进程重启后恢复已持久化的消息，但唯一节点停机期间不可用；集群高可用需要保持多数副本可用。监控发布确认耗时和未知结果、队列 ready/unacked、死信数量、消费者处理速率及磁盘告警。
 
-可靠延时投递位于独立的 `delay/rabbitmq/v2` 工作包；普通收发不依赖延时拓扑。RabbitMQ 3.13 quorum TTL/DLX 延时必须使用 at-least-once dead-lettering、`reject-publish` overflow 和有效的目标路由。该模块完成前，不要把本 adapter 当作可靠延时发布器。
+可靠延时投递由独立的 [`delay/rabbitmq/v2`](../../delay/rabbitmq/README.md) 模块提供；普通收发不依赖延时拓扑。RabbitMQ 3.13 quorum TTL/DLX 延时使用 at-least-once dead-lettering、`reject-publish` overflow 和有效的目标路由，并由独立 worker 确认投递到目标队列。
 
 故障验证可运行 `MQ_TEST_RABBIT_DOCKER_RESTART=1 go test ./adapters/rabbitmq -run TestBrokerRestartPreservesConfirmedMessage`；吞吐对照可运行 `MQ_TEST_RABBIT_URL=... go test ./adapters/rabbitmq -run '^$' -bench BenchmarkConfirmedBatch -benchmem`。在本地 RabbitMQ 3.13.3 单节点、1 KiB × 256 条、确认持久化 quorum 队列的同一进程对照中，adapter 为 44.68 MB/s，直接 AMQP 客户端为 46.02 MB/s；此数据只代表该环境的发布路径。

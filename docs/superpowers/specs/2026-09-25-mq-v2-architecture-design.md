@@ -1,7 +1,7 @@
 # MQ v2 架构设计
 
 日期：2026-09-25
-状态：设计已在对话中确认；本文等待最终审阅
+状态：已确认的设计基线；v2 实现正在长期 `v2` 分支开发，尚未发布模块标签
 
 ## 目标与范围
 
@@ -34,10 +34,11 @@ v2 是一次破坏性重构。它面向领域事件、任务、持续上报的 t
 | 模块路径 | 责任 | 允许的第三方依赖 |
 | --- | --- | --- |
 | `github.com/goairix/mq/v2` | 消息模型、最小接口、错误分类、通用选项与契约测试工具 | 无 |
-| `github.com/goairix/mq/adapters/redis/v2` | Redis Streams 普通队列、Redis 原生可靠延时 | Redis Go 客户端 |
-| `github.com/goairix/mq/adapters/rabbitmq/v2` | RabbitMQ 普通队列与 quorum/TTL/DLX 延时 | AMQP 客户端 |
+| `github.com/goairix/mq/adapters/redis/v2` | Redis Streams 普通队列 | Redis Go 客户端 |
+| `github.com/goairix/mq/adapters/rabbitmq/v2` | RabbitMQ 普通队列 | AMQP 客户端 |
 | `github.com/goairix/mq/adapters/kafka/v2` | Kafka 4.x 普通发布与消费 | `franz-go` v1.21.6；仅 Kafka 子模块要求 Go 1.25 |
 | `github.com/goairix/mq/delay/redis/v2` | 将 Redis 持久化调度器与普通 `Publisher` 组合 | Redis Go 客户端；不依赖 Kafka adapter |
+| `github.com/goairix/mq/delay/rabbitmq/v2` | RabbitMQ quorum/TTL/DLX 延时调度与 release worker | AMQP 客户端；不依赖普通 RabbitMQ adapter |
 | `github.com/goairix/mq/adapters/memory/v2` | 非持久化测试替身 | 无 |
 | `github.com/goairix/mq/observability/otel/v2` | OpenTelemetry 桥接 | OTel |
 
@@ -54,7 +55,7 @@ v2 是一次破坏性重构。它面向领域事件、任务、持续上报的 t
 - `Publisher.Publish(ctx, msg)`：正常发布。成功返回代表对应后端已经按配置确认接收，不代表业务消费者已处理。失败可能是明确失败，也可能是结果未知；结果未知用可识别的错误类别返回，调用方重试时必须保留原 ID。
 - `BatchPublisher.PublishBatch(ctx, msgs)`：批量发布。按输入顺序返回等长的逐条结果，每项为成功、失败或结果未知；不承诺整批原子性。
 - `Subscriber.Run(ctx, subscription, handler)`：阻塞运行一个订阅，handler 返回成功后确认。停止或运行故障通过返回值暴露，不把永久错误藏在后台 goroutine 中。
-- `BatchSubscriber.RunBatch(ctx, subscription, batchHandler)`：按最大消息数、字节数或等待时间交付批次。handler 返回 `nil` 结果和 `nil` 错误表示全批成功，返回普通错误表示全批重试，也可返回与输入等长的逐条结果标注成功、重试或永久失败；Kafka 只提交各分区连续完成的 offset。无效的结果长度使整批保持未确认并返回订阅错误。
+- `BatchSubscriber.RunBatch(ctx, subscription, options, batchHandler)`：按最大消息数、字节数或等待时间交付批次。handler 返回 `nil` 结果和 `nil` 错误表示全批成功，返回普通错误表示全批重试，也可返回与输入等长的逐条结果标注成功、重试或永久失败；Kafka 只提交各分区连续完成的 offset。无效的结果长度使整批保持未确认并返回订阅错误。
 - `ScheduledPublisher.PublishAt(ctx, msg, dueAt)`：可选的延时发布。返回成功表示调度记录已被后端确认；允许迟到与重复，不承诺精确时刻投递。
 
 本文件冻结行为语义；具体 Go 类型与方法签名在第一工作包设计中固定，然后实施。接口没有通用 `Pop`、`Remove`、`Size`、事务或历史重放方法；这些能力若需要，由相应后端单独提供。
@@ -101,7 +102,7 @@ Redis Stream 默认不设置可能删除未确认消息的 `MAXLEN` 截断。若
 
 普通消息热路径不创建每条消息一个 goroutine，不做强制 JSON/MsgPack 往返，不隐式初始化延时调度器或 OTel。各 adapter 保留必要的客户端批量、压缩、预取和连接复用设置；配置项由所属模块负责，不能暴露“设置了但未生效”的字段。默认发布以确认成功为准；若提供异步发布，它必须是独立接口，明确队列上限与结果通知。
 
-公共观测事件包括发布确认耗时、失败与结果未知、处理耗时、重试、死信、在途数、背压等待和队列积压。Kafka 上报 lag 与最老未处理消息年龄；Redis 和 RabbitMQ 在后端支持的范围内上报待处理/未确认量。消息 ID、trace ID、错误文本不得作为指标标签。可观测性桥接在独立模块，核心仅保留轻量的可选钩子。
+可选 OTel 装饰器记录包装边界处的发布结果、handler 结果与耗时，并通过消息头传递 trace context。内部重试、死信、在途数、背压等待、Kafka group lag 与最老未处理消息年龄，以及 Redis/RabbitMQ 待处理和未确认量应从 broker 或客户端原生监控采集。消息 ID、trace ID、错误文本不得作为指标标签。可观测性桥接在独立模块，核心不引入钩子或 OTel 依赖。
 
 积压恢复验收同时比较输入速率与成功处理速率。持续输入高于下游处理能力时，系统必须施加背压或在 broker 保留期/容量内积压，不能宣称 MQ 包装层能消除容量缺口。领域事件测试验证多订阅方、重复处理和失败隔离；trace 测试验证持续流量、批量消费和积压追赶，不把 ClickHouse 驱动放进核心。
 

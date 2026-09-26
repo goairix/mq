@@ -1,0 +1,144 @@
+name: v2 modules
+
+on:
+  push:
+    branches: [v2]
+  pull_request:
+    branches: [v2]
+
+permissions:
+  contents: read
+
+jobs:
+  core-and-optional:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: '**/go.sum'
+      - name: Verify isolated core dependency graph
+        run: test "$(GOWORK=off go list -m all)" = "github.com/goairix/mq/v2"
+      - name: Test core, Memory, and OTel
+        run: |
+          GOWORK=off go test -race ./... -count=1
+          (cd adapters/memory && go test -race ./... -count=1)
+          (cd observability/otel && go test -race ./... -count=1)
+
+  redis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['7.2', '8.0']
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: '**/go.sum'
+      - name: Start Redis with synchronous AOF
+        run: docker run -d --name mq-test-redis -p 127.0.0.1:6379:6379 redis:${{ matrix.version }} redis-server --appendonly yes --appendfsync always
+      - name: Wait for Redis
+        run: |
+          for attempt in $(seq 1 60); do
+            if docker exec mq-test-redis redis-cli ping | grep -q PONG; then exit 0; fi
+            sleep 1
+          done
+          docker logs mq-test-redis
+          exit 1
+      - name: Test Redis adapter and scheduler
+        env:
+          MQ_TEST_REDIS_ADDR: 127.0.0.1:6379
+        run: go test -race ./adapters/redis/... ./delay/redis/... -count=1
+
+  redis-restart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: '**/go.sum'
+      - name: Test confirmed Redis AOF schedule across crash
+        env:
+          MQ_TEST_DOCKER_RESTART: '1'
+        run: go test ./delay/redis/... -run '^TestAOFRecoveryAfterRedisCrash$' -count=1 -v
+
+  rabbitmq:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: '**/go.sum'
+      - name: Start RabbitMQ 3.13.3
+        run: docker run -d --name mq-test-rabbit -p 127.0.0.1:5672:5672 -p 127.0.0.1:15672:15672 rabbitmq:3.13.3-management
+      - name: Wait for RabbitMQ and enable quorum DLX prerequisite
+        run: |
+          for attempt in $(seq 1 90); do
+            if docker exec mq-test-rabbit rabbitmq-diagnostics -q ping; then break; fi
+            sleep 1
+          done
+          docker exec mq-test-rabbit rabbitmqctl enable_feature_flag stream_queue
+      - name: Test RabbitMQ adapter and scheduler
+        env:
+          MQ_TEST_RABBIT_URL: amqp://guest:guest@127.0.0.1:5672/
+          MQ_TEST_RABBIT_MGMT_URL: http://127.0.0.1:15672
+        run: go test -race ./adapters/rabbitmq/... ./delay/rabbitmq/... -count=1
+
+  rabbitmq-restart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: '**/go.sum'
+      - name: Test confirmed RabbitMQ messages and schedules across restart
+        env:
+          MQ_TEST_RABBIT_DOCKER_RESTART: '1'
+        run: |
+          go test ./adapters/rabbitmq/... -run '^TestBrokerRestartPreservesConfirmedMessage$' -count=1 -v
+          go test ./delay/rabbitmq/... -run '^TestBrokerRestartPreservesDelayedMessage$' -count=1 -v
+
+  kafka:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['4.0.2', '4.1.2']
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: '**/go.sum'
+      - name: Start Kafka KRaft
+        run: docker run -d --name mq-test-kafka -p 127.0.0.1:9092:9092 apache/kafka:${{ matrix.version }}
+      - name: Wait for Kafka and provision test topics
+        run: |
+          for attempt in $(seq 1 90); do
+            if docker exec mq-test-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list; then break; fi
+            sleep 1
+          done
+          docker exec mq-test-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic mq-v2-test --partitions 3 --replication-factor 1
+          docker exec mq-test-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic mq-v2-test.dlq --partitions 3 --replication-factor 1
+      - name: Test Kafka adapter
+        env:
+          MQ_TEST_KAFKA_BROKERS: 127.0.0.1:9092
+          MQ_TEST_KAFKA_TOPIC: mq-v2-test
+        run: go test -race ./adapters/kafka/... -count=1
+      - name: Test confirmed message across broker restart
+        env:
+          MQ_TEST_KAFKA_BROKERS: 127.0.0.1:9092
+          MQ_TEST_KAFKA_DOCKER_RESTART: mq-test-kafka
+        run: go test ./adapters/kafka/... -run '^TestBrokerRestartPreservesConfirmedKafkaMessage$' -count=1

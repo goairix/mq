@@ -43,4 +43,6 @@ go func() {
 
 Redis 需要按业务可靠性要求配置 AOF、复制、Sentinel/Cluster 和内存上限。单节点进程重启恢复依赖已持久化的数据；异步复制故障切换仍可能丢失刚被确认的写入。不要对仍可能被任一订阅组读取或待确认的 Stream 使用 `MAXLEN`、`XTRIM` 或过期时间；本 adapter 不做自动截断。容量不足时 Redis 返回错误或阻塞，应监控 Stream 长度、组 lag、pending 数量、最老 pending 年龄，以及成功处理速率与发布速率。
 
-当前模块只实现普通消息。持久化延时投递属于独立调度工作包；不要把 Memory adapter 的 `PublishAt` 当成生产保障。
+当前模块只实现普通消息。需要持久化延时投递时，单独引入 [`delay/redis/v2`](../../delay/redis/README.md)，以本 adapter 作为其目标 `mq.Publisher`。不要把 Memory adapter 的 `PublishAt` 当成生产保障。
+
+发布吞吐对照可在 AOF `appendfsync always` 的 Redis 上运行 `MQ_TEST_REDIS_ADDR=... go test ./adapters/redis -run '^$' -bench '^BenchmarkConfirmedBatch$' -benchmem`。基准使用同一 go-redis client、Stream、256 条 × 1 KiB 消息和确认策略；`paired` 子基准交替运行 adapter 与直接 pipeline，以减少服务端状态随时间变化带来的顺序偏差。Apple M5 本地 Redis 7.2 的三次 paired 采样中，adapter 相对直接客户端为 103.0%、96.76%、100.4%；Redis 8.0 为 113.0%、95.05%、99.73%。这些数字只代表本地确认发布路径，不包含消费者和下游处理。

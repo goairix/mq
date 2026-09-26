@@ -48,18 +48,22 @@ func (a *Adapter) PublishBatch(ctx context.Context, messages []mq.Message) []mq.
 			break
 		}
 		pipeline := a.client.Pipeline()
-		commands := make(map[int]*redis.StringCmd, end-start)
+		commands := make([]*redis.StringCmd, end-start)
 		for i := start; i < end; i++ {
 			if err := messages[i].Validate(); err != nil {
 				results[i] = mq.PublishResult{State: mq.PublishRejected, Err: err}
 				continue
 			}
-			commands[i] = pipeline.XAdd(ctx, &redis.XAddArgs{Stream: a.streamKey(messages[i].Topic), Values: encode(messages[i])})
+			commands[i-start] = pipeline.XAdd(ctx, &redis.XAddArgs{Stream: a.streamKey(messages[i].Topic), Values: encode(messages[i])})
 		}
-		if len(commands) > 0 {
+		if pipeline.Len() > 0 {
 			_, _ = pipeline.Exec(ctx)
 		}
-		for i, command := range commands {
+		for offset, command := range commands {
+			if command == nil {
+				continue
+			}
+			i := start + offset
 			if err := command.Err(); err != nil {
 				results[i] = mq.PublishResult{State: mq.PublishUnknown, Err: mq.OutcomeUnknown(err)}
 			} else if command.Val() == "" {

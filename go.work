@@ -8,6 +8,7 @@ use (
 	./adapters/rabbitmq
 	./delay/redis
 	./delay/rabbitmq
+	./observability/otel
 )
 
 // Keep the unpublished local root version resolvable for workspace graph tools.
