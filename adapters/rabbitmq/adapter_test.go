@@ -50,6 +50,10 @@ func TestWirePreservesEnvelope(t *testing.T) {
 	if got.ID != m.ID || got.Topic != m.Topic || !bytes.Equal(got.Key, m.Key) || !bytes.Equal(got.Payload, m.Payload) || got.Headers["trace"] != m.Headers["trace"] || !got.CreatedAt.Equal(m.CreatedAt) {
 		t.Fatalf("round trip = %+v", got)
 	}
+	d.Headers["x-delivery-count"] = int64(1)
+	if _, err := decode(d); err != nil {
+		t.Fatalf("broker delivery metadata rejected: %v", err)
+	}
 	d.Headers["mq.v"] = int32(99)
 	if _, err := decode(d); err == nil {
 		t.Fatal("unknown wire version accepted")

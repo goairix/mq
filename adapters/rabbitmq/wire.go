@@ -3,7 +3,6 @@ package rabbitadapter
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	mq "github.com/goairix/mq/v2"
@@ -11,15 +10,17 @@ import (
 )
 
 func encode(message mq.Message) amqp.Publishing {
+	userHeaders := make(amqp.Table, len(message.Headers))
+	for key, value := range message.Headers {
+		userHeaders[key] = value
+	}
 	headers := amqp.Table{
 		"mq.v":            int32(1),
 		"mq.topic":        message.Topic,
 		"mq.key":          append([]byte{}, message.Key...),
 		"mq.created.sec":  message.CreatedAt.Unix(),
 		"mq.created.nsec": int32(message.CreatedAt.Nanosecond()),
-	}
-	for key, value := range message.Headers {
-		headers[key] = value
+		"mq.headers":      userHeaders,
 	}
 	return amqp.Publishing{Headers: headers, ContentType: "application/octet-stream", DeliveryMode: amqp.Persistent, MessageId: message.ID, Timestamp: message.CreatedAt, Body: append([]byte(nil), message.Payload...)}
 }
@@ -50,11 +51,12 @@ func decode(delivery amqp.Delivery) (mq.Message, error) {
 	if !ok || nanos < 0 || nanos >= 1e9 {
 		return mq.Message{}, errors.New("invalid RabbitMQ creation nanoseconds")
 	}
-	headers := make(map[string]string)
-	for name, raw := range delivery.Headers {
-		if strings.HasPrefix(strings.ToLower(name), "mq.") {
-			continue
-		}
+	rawHeaders, ok := delivery.Headers["mq.headers"].(amqp.Table)
+	if !ok {
+		return mq.Message{}, errors.New("invalid RabbitMQ user headers")
+	}
+	headers := make(map[string]string, len(rawHeaders))
+	for name, raw := range rawHeaders {
 		value, ok := raw.(string)
 		if !ok {
 			return mq.Message{}, fmt.Errorf("invalid RabbitMQ header %q", name)

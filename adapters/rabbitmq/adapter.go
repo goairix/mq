@@ -20,13 +20,14 @@ type Options struct {
 	PublishChannels  int
 	PublishBatchSize int
 	Prefetch         int
+	PollInterval     time.Duration
 	DrainTimeout     time.Duration
 	RetryMin         time.Duration
 	RetryMax         time.Duration
 }
 
 func (o Options) withDefaults() (Options, error) {
-	if o.PublishChannels < 0 || o.PublishBatchSize < 0 || o.Prefetch < 0 || o.DrainTimeout < 0 || o.RetryMin < 0 || o.RetryMax < 0 {
+	if o.PublishChannels < 0 || o.PublishBatchSize < 0 || o.Prefetch < 0 || o.PollInterval < 0 || o.DrainTimeout < 0 || o.RetryMin < 0 || o.RetryMax < 0 {
 		return o, errors.New("negative RabbitMQ option")
 	}
 	if o.Prefix == "" {
@@ -49,6 +50,12 @@ func (o Options) withDefaults() (Options, error) {
 	}
 	if o.Prefetch == 0 {
 		o.Prefetch = 128
+	}
+	if o.PollInterval == 0 {
+		o.PollInterval = 20 * time.Millisecond
+	}
+	if o.PollInterval < time.Millisecond {
+		return o, errors.New("PollInterval must be at least one millisecond")
 	}
 	if o.DrainTimeout == 0 {
 		o.DrainTimeout = 30 * time.Second
