@@ -20,7 +20,7 @@ func (w observedPublisher) Publish(ctx context.Context, message mq.Message) erro
 	defer span.End()
 	start := time.Now()
 	err := w.target.Publish(ctx, cloneWithTrace(ctx, w.instrumentation.propagator, message))
-	w.instrumentation.recordPublish(ctx, "publish", message.Topic, publishResult(err), 1, time.Since(start))
+	w.instrumentation.recordPublish(ctx, "publish", message.Topic, publishResult(err), 1, len(message.Payload), time.Since(start))
 	recordSpanError(span, err)
 	return err
 }
@@ -43,7 +43,8 @@ func (w observedBatchPublisher) PublishBatch(ctx context.Context, messages []mq.
 	results := w.target.PublishBatch(ctx, copied)
 	duration := time.Since(start)
 	type group struct{ topic, outcome string }
-	counts := make(map[group]int)
+	type amount struct{ messages, bytes int }
+	counts := make(map[group]amount)
 	batchOutcome := "empty"
 	for index, result := range results {
 		if index >= len(messages) {
@@ -61,13 +62,17 @@ func (w observedBatchPublisher) PublishBatch(ctx context.Context, messages []mq.
 		} else if batchOutcome != outcome {
 			batchOutcome = "mixed"
 		}
-		counts[group{topic: messages[index].Topic, outcome: outcome}]++
+		key := group{topic: messages[index].Topic, outcome: outcome}
+		value := counts[key]
+		value.messages++
+		value.bytes += len(messages[index].Payload)
+		counts[key] = value
 		if result.Err != nil {
 			recordSpanError(span, result.Err)
 		}
 	}
-	for group, count := range counts {
-		w.instrumentation.recordPublishCount(ctx, "publish_batch", group.topic, group.outcome, count)
+	for group, amount := range counts {
+		w.instrumentation.recordPublishCount(ctx, "publish_batch", group.topic, group.outcome, amount.messages, amount.bytes)
 	}
 	topic, outcome := "__empty__", batchOutcome
 	if len(messages) > 0 {
@@ -100,9 +105,11 @@ func (w observedSubscriber) Run(ctx context.Context, sub mq.Subscription, handle
 		parent := w.instrumentation.extract(handlerCtx, message)
 		spanCtx, span := w.instrumentation.tracer.Start(parent, "mq.consume", trace.WithSpanKind(trace.SpanKindConsumer), trace.WithAttributes(attribute.String("topic", sub.Topic), attribute.String("subscription", sub.Name)))
 		defer span.End()
+		w.instrumentation.recordConsumeStart(spanCtx, sub, 1, message.CreatedAt, time.Now())
+		defer w.instrumentation.recordConsumeFinish(spanCtx, sub, 1)
 		start := time.Now()
 		err := handler(spanCtx, message)
-		w.instrumentation.recordConsume(spanCtx, sub, consumeResult(err), 1, time.Since(start))
+		w.instrumentation.recordConsume(spanCtx, sub, consumeResult(err), 1, len(message.Payload), time.Since(start))
 		recordSpanError(span, err)
 		return err
 	})
@@ -119,7 +126,13 @@ func (w observedBatchSubscriber) RunBatch(ctx context.Context, sub mq.Subscripti
 	}
 	return w.target.RunBatch(ctx, sub, options, func(handlerCtx context.Context, messages []mq.Message) ([]error, error) {
 		links := make([]trace.Link, 0, len(messages))
+		var oldest time.Time
+		payloadBytes := 0
 		for _, message := range messages {
+			payloadBytes += len(message.Payload)
+			if !message.CreatedAt.IsZero() && (oldest.IsZero() || message.CreatedAt.Before(oldest)) {
+				oldest = message.CreatedAt
+			}
 			spanContext := trace.SpanContextFromContext(w.instrumentation.extract(handlerCtx, message))
 			if spanContext.IsValid() {
 				links = append(links, trace.Link{SpanContext: spanContext})
@@ -135,32 +148,39 @@ func (w observedBatchSubscriber) RunBatch(ctx context.Context, sub mq.Subscripti
 			_, linked := w.instrumentation.tracer.Start(spanCtx, "mq.consume.batch.links", trace.WithLinks(links[start:min(start+linksPerSpan, len(links))]...), trace.WithAttributes(attribute.Int("link.group", start/linksPerSpan)))
 			linked.End()
 		}
+		w.instrumentation.recordConsumeStart(spanCtx, sub, len(messages), oldest, time.Now())
+		defer w.instrumentation.recordConsumeFinish(spanCtx, sub, len(messages))
 		start := time.Now()
 		results, err := handler(spanCtx, messages)
 		duration := time.Since(start)
 		if err != nil {
-			w.instrumentation.recordConsume(spanCtx, sub, "retry", len(messages), duration)
+			w.instrumentation.recordConsume(spanCtx, sub, "retry", len(messages), payloadBytes, duration)
 			recordSpanError(span, err)
 			return results, err
 		}
 		if results != nil && len(results) != len(messages) {
-			w.instrumentation.recordConsume(spanCtx, sub, "invalid", len(messages), duration)
+			w.instrumentation.recordConsume(spanCtx, sub, "invalid", len(messages), payloadBytes, duration)
 			recordSpanError(span, fmt.Errorf("batch handler returned %d results for %d messages", len(results), len(messages)))
 			return results, nil
 		}
 		if results == nil {
-			w.instrumentation.recordConsume(spanCtx, sub, "success", len(messages), duration)
+			w.instrumentation.recordConsume(spanCtx, sub, "success", len(messages), payloadBytes, duration)
 			return nil, nil
 		}
-		counts := make(map[string]int)
-		for _, result := range results {
-			counts[consumeResult(result)]++
+		type amount struct{ messages, bytes int }
+		counts := make(map[string]amount)
+		for index, result := range results {
+			outcome := consumeResult(result)
+			value := counts[outcome]
+			value.messages++
+			value.bytes += len(messages[index].Payload)
+			counts[outcome] = value
 			if result != nil {
 				recordSpanError(span, result)
 			}
 		}
-		for result, count := range counts {
-			w.instrumentation.recordConsumeCount(spanCtx, sub, result, count)
+		for result, amount := range counts {
+			w.instrumentation.recordConsumeCount(spanCtx, sub, result, amount.messages, amount.bytes)
 		}
 		outcome := "mixed"
 		if len(counts) == 1 {
@@ -183,7 +203,7 @@ func (w observedScheduledPublisher) PublishAt(ctx context.Context, message mq.Me
 	defer span.End()
 	start := time.Now()
 	err := w.target.PublishAt(ctx, cloneWithTrace(ctx, w.instrumentation.propagator, message), due)
-	w.instrumentation.recordPublish(ctx, "schedule", message.Topic, publishResult(err), 1, time.Since(start))
+	w.instrumentation.recordPublish(ctx, "schedule", message.Topic, publishResult(err), 1, len(message.Payload), time.Since(start))
 	recordSpanError(span, err)
 	return err
 }
