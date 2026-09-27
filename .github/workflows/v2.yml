@@ -80,13 +80,20 @@ jobs:
           cache-dependency-path: '**/go.sum'
       - name: Start RabbitMQ 3.13.3
         run: docker run -d --name mq-test-rabbit -p 127.0.0.1:5672:5672 -p 127.0.0.1:15672:15672 rabbitmq:3.13.3-management
-      - name: Wait for RabbitMQ and enable quorum DLX prerequisite
+      - name: Wait for RabbitMQ AMQP listener
         run: |
+          ready=false
           for attempt in $(seq 1 90); do
-            if docker exec mq-test-rabbit rabbitmq-diagnostics -q ping; then break; fi
+            if docker exec --user rabbitmq mq-test-rabbit rabbitmq-diagnostics -q check_port_listener 5672; then
+              ready=true
+              break
+            fi
             sleep 1
           done
-          docker exec mq-test-rabbit rabbitmqctl enable_feature_flag stream_queue
+          if [ "$ready" != true ]; then
+            docker logs mq-test-rabbit
+            exit 1
+          fi
       - name: Test RabbitMQ adapter and scheduler
         env:
           MQ_TEST_RABBIT_URL: amqp://guest:guest@127.0.0.1:5672/
