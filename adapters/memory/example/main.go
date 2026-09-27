@@ -28,7 +28,7 @@ func run() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	sub := mq.Subscription{Topic: "order.created", Name: "billing"}
+	sub := mq.Subscription{Topic: "jobs.email", Name: "workers"}
 	received := make(chan mq.Message, 1)
 	finished := make(chan error, 1)
 	go func() {
@@ -38,7 +38,7 @@ func run() error {
 		})
 	}()
 
-	message, err := mq.NewMessage(sub.Topic, []byte(`{"order_id":"123"}`))
+	message, err := mq.NewMessage(sub.Topic, []byte(`{"to":"user@example.com"}`))
 	if err != nil {
 		return err
 	}

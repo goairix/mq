@@ -88,13 +88,13 @@ func (i *Instrumentation) ScheduledPublisher(target mq.ScheduledPublisher) mq.Sc
 }
 
 func cloneWithTrace(ctx context.Context, propagator propagation.TextMapPropagator, message mq.Message) mq.Message {
-	copy := message
-	copy.Headers = make(map[string]string, len(message.Headers)+2)
+	cp := message
+	cp.Headers = make(map[string]string, len(message.Headers)+2)
 	for key, value := range message.Headers {
-		copy.Headers[key] = value
+		cp.Headers[key] = value
 	}
-	propagator.Inject(ctx, propagation.MapCarrier(copy.Headers))
-	return copy
+	propagator.Inject(ctx, propagation.MapCarrier(cp.Headers))
+	return cp
 }
 
 func (i *Instrumentation) extract(ctx context.Context, message mq.Message) context.Context {
