@@ -83,6 +83,7 @@ if [[ "$ready" != true ]]; then
 fi
 
 export MQ_TEST_CLUSTER_RUN_ID="$run_id"
+unset MQ_TEST_REDIS_ADDR MQ_TEST_REDIS_SENTINEL_ADDRS MQ_TEST_REDIS_SENTINEL_MASTER
 export MQ_TEST_REDIS_CLUSTER_ADDR='127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003,127.0.0.1:7004,127.0.0.1:7005,127.0.0.1:7006'
 cd "$repo_root"
 if [[ "$scenario" == benchmark ]]; then

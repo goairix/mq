@@ -18,11 +18,18 @@ import (
 func BenchmarkConfirmedBatch(b *testing.B) {
 	addr := os.Getenv("MQ_TEST_REDIS_ADDR")
 	clusterAddresses := os.Getenv("MQ_TEST_REDIS_CLUSTER_ADDR")
-	if addr == "" && clusterAddresses == "" {
-		b.Skip("set MQ_TEST_REDIS_ADDR or MQ_TEST_REDIS_CLUSTER_ADDR")
+	sentinelAddresses := os.Getenv("MQ_TEST_REDIS_SENTINEL_ADDRS")
+	if addr == "" && clusterAddresses == "" && sentinelAddresses == "" {
+		b.Skip("set MQ_TEST_REDIS_ADDR, MQ_TEST_REDIS_CLUSTER_ADDR, or MQ_TEST_REDIS_SENTINEL_ADDRS")
 	}
 	var client redis.UniversalClient
-	if clusterAddresses != "" {
+	if sentinelAddresses != "" {
+		masterName := os.Getenv("MQ_TEST_REDIS_SENTINEL_MASTER")
+		if masterName == "" {
+			b.Fatal("MQ_TEST_REDIS_SENTINEL_MASTER is required with Sentinel addresses")
+		}
+		client = newSentinelFailoverClient(masterName, strings.Split(sentinelAddresses, ","))
+	} else if clusterAddresses != "" {
 		client = redis.NewClusterClient(&redis.ClusterOptions{
 			Addrs: strings.Split(clusterAddresses, ","),
 			Dialer: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -37,6 +44,9 @@ func BenchmarkConfirmedBatch(b *testing.B) {
 		client = redis.NewClient(&redis.Options{Addr: addr})
 	}
 	defer client.Close()
+	if err := client.Ping(context.Background()).Err(); err != nil {
+		b.Fatalf("connect to benchmark Redis: %v", err)
+	}
 	adapter, err := New(client, Options{Prefix: "mq:v2:bench:" + time.Now().Format("150405.000000000")})
 	if err != nil {
 		b.Fatal(err)

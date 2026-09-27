@@ -30,6 +30,8 @@ if err := scheduler.PublishAt(ctx, msg, time.Now().Add(time.Hour)); err != nil {
 
 可靠的单节点进程重启恢复要求调度 Redis 启用 AOF，且设置 `appendfsync always`。`everysec` 可丢失最近约一秒的已确认写入，不满足本模块的可靠延时配置。Sentinel/Cluster 的异步复制故障切换仍可能丢失刚确认的写入，不能承诺零丢失。
 
+调用方可把 `redis.NewFailoverClient` 传入 `redisdelay.New`，由同一个 client 在 Sentinel 选出新主后继续访问调度记录；实际主节点切换测试见[集群测试说明](../../tests/cluster/README.md)。
+
 同一个 `Prefix` 的 `Shards` 数量必须在仍有未完成任务时保持一致，否则旧 lane 可能无人扫描。新部署默认 1 个 lane，适合尚无延时吞吐目标的应用；需要分摊到 Redis Cluster 多个 hash slot 时，在首次调度前显式配置更多 `Shards`。每条 lane 的索引、租约、消息体和 token key 使用同一个 hash slot。`Run` 单实例顺序处理任务，可运行多个相同配置的 worker 来提高调度吞吐。到期精度为毫秒，`PollInterval` 默认 100 毫秒，实际投递允许迟到。若已用先前开发版本的默认 16 lane 写入未完成任务，先显式设 `Shards: 16` 处理完，再换新的 `Prefix` 使用新默认值。
 
 空队列时，每个 worker 每轮会对每个 lane 发一次 Redis Lua 查询；近似请求量为 `worker 数 × Shards ÷ PollInterval`。默认 1 lane、100 ms 约为每 worker 10 次查询/秒；空查询不改写 Redis，也不会触发 AOF fsync。不要在每个 API 副本都启动 worker，通常单独运行少量受监督的 worker。允许更大投递迟到时可调高 `PollInterval`；提高 `Shards` 或 worker 数之前应先测真实延时负载。Redis 7.2 本地 AOF `appendfsync always`、Apple M5、无待投递任务的两秒采样中，旧 16 lane 默认单 worker 约 152 次脚本请求/秒，4 worker 约 576 次；1 lane 单 worker 约 10 次。1000 条小消息、内存目标发布器的单 worker 本地采样约 900 条/秒，这不是 Kafka 确认吞吐的预测值。

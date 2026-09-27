@@ -27,6 +27,7 @@ case "$backend" in
         MQ_CLUSTER_BENCHMARK=1 bash "$here/rabbitmq.sh"
         for redis_version in 7.2 8.0; do
           bash "$here/redis.sh" "$redis_version" benchmark
+          bash "$here/sentinel.sh" "$redis_version" benchmark
         done
         ;;
       kafka)
@@ -42,8 +43,11 @@ case "$backend" in
       redis)
         bash "$here/redis.sh" "${benchmark_version:-7.2}" benchmark
         ;;
+      sentinel)
+        bash "$here/sentinel.sh" "${benchmark_version:-7.2}" benchmark
+        ;;
       *)
-        echo 'usage: bash tests/cluster/run.sh bench [all|kafka|rabbitmq|redis] [version]' >&2
+        echo 'usage: bash tests/cluster/run.sh bench [all|kafka|rabbitmq|redis|sentinel] [version]' >&2
         exit 2
         ;;
     esac
@@ -59,6 +63,8 @@ case "$backend" in
     for redis_version in 7.2 8.0; do
       bash "$here/redis.sh" "$redis_version" adapter
       bash "$here/redis.sh" "$redis_version" delay
+      bash "$here/sentinel.sh" "$redis_version" adapter
+      bash "$here/sentinel.sh" "$redis_version" delay
     done
     ;;
   kafka)
@@ -76,8 +82,13 @@ case "$backend" in
       bash "$here/redis.sh" "${version:-7.2}" "$scenario"
     done
     ;;
+  sentinel)
+    for scenario in adapter delay; do
+      bash "$here/sentinel.sh" "${version:-7.2}" "$scenario"
+    done
+    ;;
   *)
-    echo 'usage: bash tests/cluster/run.sh [all|kafka|rabbitmq|redis|bench] [backend or version] [version]' >&2
+    echo 'usage: bash tests/cluster/run.sh [all|kafka|rabbitmq|redis|sentinel|bench] [backend or version] [version]' >&2
     exit 2
     ;;
 esac

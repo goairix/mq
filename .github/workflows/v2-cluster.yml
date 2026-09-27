@@ -21,6 +21,7 @@ on:
           - kafka
           - rabbitmq
           - redis
+          - sentinel
 
 permissions:
   contents: read
